@@ -1,0 +1,19 @@
+{
+  "discord_channel_id": "YOUR_CHANNEL_ID_HERE",
+  "discord_guild_id": "YOUR_GUILD_ID_HERE",
+  "discord_channel_name": "cw-ticketing",
+  "cw_base_url": "https://na.myconnectwise.net/v4_6_release/apis/3.0",
+  "default_priority_id": 8,
+  "default_priority_name": "Medium",
+  "company_mapping": {
+    "Example Company 1": 12345,
+    "Example Company 2": 12346,
+    "Example Company 3": 12347
+  },
+  "priority_ids": {
+    "critical": 6,
+    "high": 15,
+    "medium": 8,
+    "low": 7
+  }
+}

@@ -1,0 +1,19 @@
+[Unit]
+Description=Discord CW Ticket Bot - Conversational Ticket Creation
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/path/to/bot/directory
+Environment="PATH=/path/to/bot/directory/venv/bin"
+EnvironmentFile=/path/to/bot/directory/.env
+ExecStart=/path/to/bot/directory/venv/bin/python3 discord_ticket_bot.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
