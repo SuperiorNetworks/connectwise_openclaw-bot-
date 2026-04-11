@@ -32,6 +32,7 @@ Dependencies:
 Change Log:
   2026-04-09 v2.0.0 - Enhanced parsing, scheduling, and natural language support
   2026-04-11 v2.0.1 - Fixed update detection: now matches 'add to ticket N', 'note on N', bare '#N' (Dwain Henderson Jr)
+  2026-04-11 v2.0.2 - Fixed 400 error on note POST: detailDescriptionFlag must be True (Dwain Henderson Jr)
 """
 
 import re
@@ -490,7 +491,7 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
 
         payload = {
             "text": note,
-            "detailDescriptionFlag": False,
+            "detailDescriptionFlag": True,   # REQUIRED: at least one flag must be True
             "internalAnalysisFlag": False,
             "resolutionFlag": False
         }
