@@ -35,6 +35,7 @@ Change Log:
   2026-04-11 v2.0.2 - Fixed 400 error on note POST: detailDescriptionFlag must be True (Dwain Henderson Jr)
   2026-04-11 v2.0.3 - Auto-bullet multi-line notes; strip formatting instructions like 'list in bullet style' (Dwain Henderson Jr)
   2026-04-11 v2.0.4 - Added Miles:/AI: command prefix system with Claude AI routing (Dwain Henderson Jr)
+  2026-04-11 v2.0.5 - Fixed conversational fallback: bare client name no longer treated as subject (Dwain Henderson Jr)
 """
 
 import re
@@ -158,9 +159,24 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
         note_body = self._extract_note_body(text)
         if note_body:
             result["note_body"] = note_body
-        # Ticket is complete with just client + subject (description is optional)
+
+        # Guard: subject must be DIFFERENT from the client name (or a fragment of it).
+        # If the only text is the client name, subject extraction will return the client
+        # name itself — that is NOT a real subject, so treat it as missing.
+        if result["subject"] and result["client_name"]:
+            subj_clean = result["subject"].strip().lower()
+            client_clean = result["client_name"].strip().lower()
+            # Reject subject if it IS the client name, starts with it, or is contained in it
+            if (subj_clean == client_clean
+                    or subj_clean in client_clean
+                    or client_clean in subj_clean
+                    or client_clean.split()[0] in subj_clean.split()):
+                result["subject"] = None
+
+        # A ticket is only "complete" (skip conversational flow) when it has BOTH
+        # a client name AND a real subject that is distinct from the client name.
         result["complete"] = bool(result["client_name"] and result["subject"])
-        
+
         return result
     
     def _extract_client_name(self, text: str) -> Optional[str]:
