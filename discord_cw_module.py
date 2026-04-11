@@ -34,6 +34,7 @@ Change Log:
   2026-04-11 v2.0.1 - Fixed update detection: now matches 'add to ticket N', 'note on N', bare '#N' (Dwain Henderson Jr)
   2026-04-11 v2.0.2 - Fixed 400 error on note POST: detailDescriptionFlag must be True (Dwain Henderson Jr)
   2026-04-11 v2.0.3 - Auto-bullet multi-line notes; strip formatting instructions like 'list in bullet style' (Dwain Henderson Jr)
+  2026-04-11 v2.0.4 - Added Miles:/AI: command prefix system with Claude AI routing (Dwain Henderson Jr)
 """
 
 import re
@@ -41,6 +42,10 @@ import json
 import base64
 import lzma
 import requests
+try:
+    import anthropic as _anthropic
+except ImportError:
+    _anthropic = None
 from datetime import datetime, timedelta, time, time
 from typing import Optional, Tuple, Dict, Any
 try:
@@ -76,6 +81,15 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
         
         # Conversation state
         self.conversations = {}
+
+        # Claude AI client (for Miles:/AI: commands)
+        self._claude_key = config.get("anthropic_api_key", "")
+        self._claude = None
+        if _anthropic and self._claude_key:
+            try:
+                self._claude = _anthropic.Anthropic(api_key=self._claude_key)
+            except Exception as e:
+                print(f"[Miles] Claude init failed: {e}")
     
     # ============================================================================
     # ENHANCED PARSING - One-shot extraction
@@ -756,6 +770,171 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
         """Bot ready"""
         print(f"✅ Enhanced Bot v2 logged in as {self.bot.user}")
     
+    # ============================================================================
+    # MILES: / AI: COMMAND SYSTEM
+    # ============================================================================
+
+    async def _handle_miles_command(self, message: discord.Message, instruction: str, body: str) -> bool:
+        """
+        Handle a Miles:/AI: prefixed instruction.
+        Returns True if handled, False if not recognized (caller should fall through).
+
+        Supported instructions:
+          summarize ticket <N>          - fetch ticket and post a summary
+          translate to <lang>           - AI translate the body text
+          add a priority note at the top - prepend PRIORITY header to body
+          list in bullet style          - format body as bullets
+          numbered list                 - format body as numbered list
+          send to AI / ask AI           - send body to Claude and reply with response
+          help / commands               - list available commands
+        """
+        instr = instruction.strip().lower()
+        print(f"[Miles] Command: '{instr}' | Body: '{body[:60]}'")
+
+        # ── help / commands ──────────────────────────────────────────────────
+        if re.search(r'^(help|commands|what can you do)$', instr):
+            help_text = (
+                "**Miles Command Reference** (use `Miles:` or `AI:` prefix)\n"
+                "```\n"
+                "Miles: summarize ticket 31666\n"
+                "Miles: translate to Spanish\n"
+                "Miles: add a priority note at the top\n"
+                "Miles: list in bullet style\n"
+                "Miles: numbered list\n"
+                "Miles: send to AI <question or text>\n"
+                "Miles: help\n"
+                "```\n"
+                "You can also combine with ticket updates:\n"
+                "`add to ticket 31666 - <note>\nMiles: list in bullet style`"
+            )
+            await message.reply(help_text, mention_author=False)
+            return True
+
+        # ── summarize ticket N ───────────────────────────────────────────────
+        m = re.search(r'summarize\s+ticket\s+#?(\d{4,6})', instr)
+        if m:
+            ticket_id = int(m.group(1))
+            result = self.get_ticket(ticket_id)
+            if result["status"] != "success":
+                await message.reply(f"❌ Ticket #{ticket_id} not found")
+                return True
+            t = result["ticket"]
+            company = t.get("company", {}).get("name", "Unknown")
+            summary = t.get("summary", "(no summary)")
+            status = t.get("status", {}).get("name", "Unknown")
+            priority = t.get("priority", {}).get("name", "Unknown")
+            # Ask Claude for a plain-English summary if available
+            ai_summary = ""
+            if self._claude:
+                try:
+                    resp = self._claude.messages.create(
+                        model="claude-haiku-4-5",
+                        max_tokens=300,
+                        messages=[{"role": "user", "content": f"Summarize this IT ticket in 2-3 sentences for a technician:\nClient: {company}\nSummary: {summary}\nStatus: {status}\nPriority: {priority}"}]
+                    )
+                    ai_summary = resp.content[0].text.strip()
+                except Exception as e:
+                    print(f"[Miles] Claude error: {e}")
+            embed = discord.Embed(
+                title=f"📋 Ticket #{ticket_id} Summary",
+                description=ai_summary or summary,
+                color=discord.Color.blurple(),
+                url=self._generate_deep_link(ticket_id)
+            )
+            embed.add_field(name="Client", value=company, inline=True)
+            embed.add_field(name="Status", value=status, inline=True)
+            embed.add_field(name="Priority", value=priority, inline=True)
+            embed.add_field(name="Subject", value=summary[:200], inline=False)
+            await message.reply(embed=embed, mention_author=False)
+            return True
+
+        # ── translate to <lang> ──────────────────────────────────────────────
+        m = re.search(r'translate\s+(?:to\s+)?([a-z]+)', instr)
+        if m:
+            lang = m.group(1).capitalize()
+            text_to_translate = body or "(no text provided)"
+            if not self._claude:
+                await message.reply("❌ AI not available — Claude API key not configured")
+                return True
+            try:
+                resp = self._claude.messages.create(
+                    model="claude-haiku-4-5",
+                    max_tokens=500,
+                    messages=[{"role": "user", "content": f"Translate the following text to {lang}. Return only the translated text, nothing else:\n\n{text_to_translate}"}]
+                )
+                translated = resp.content[0].text.strip()
+                await message.reply(f"🌐 **{lang} translation:**\n{translated}", mention_author=False)
+            except Exception as e:
+                await message.reply(f"❌ Translation failed: {e}")
+            return True
+
+        # ── add a priority note at the top ───────────────────────────────────
+        if re.search(r'add\s+(?:a\s+)?priority\s+note', instr):
+            if not body:
+                await message.reply("❌ No text provided to add a priority note to")
+                return True
+            priority_note = f"⚠️ PRIORITY\n{'─'*30}\n{body}"
+            await message.reply(f"📌 Priority note formatted:\n```\n{priority_note}\n```", mention_author=False)
+            return True
+
+        # ── list in bullet style ─────────────────────────────────────────────
+        if re.search(r'list\s+(?:it\s+)?in\s+bullet(?:\s+style|s)?', instr):
+            if not body:
+                await message.reply("❌ No text provided to format as bullets")
+                return True
+            lines = [ln.strip() for ln in body.splitlines() if ln.strip()]
+            bulleted = '\n'.join(f'• {ln}' for ln in lines)
+            await message.reply(f"📝 Formatted:\n{bulleted}", mention_author=False)
+            return True
+
+        # ── numbered list ────────────────────────────────────────────────────
+        if re.search(r'numbered\s+list|number\s+(?:the\s+)?(?:items|lines)', instr):
+            if not body:
+                await message.reply("❌ No text provided to number")
+                return True
+            lines = [ln.strip() for ln in body.splitlines() if ln.strip()]
+            numbered = '\n'.join(f'{i+1}. {ln}' for i, ln in enumerate(lines))
+            await message.reply(f"📝 Numbered:\n{numbered}", mention_author=False)
+            return True
+
+        # ── send to AI / ask AI ──────────────────────────────────────────────
+        if re.search(r'^(send\s+to\s+ai|ask\s+ai|ai\s+response|ask\s+claude)', instr) or (not body and instr):
+            prompt = body or instruction
+            if not self._claude:
+                await message.reply("❌ AI not available — Claude API key not configured")
+                return True
+            try:
+                async with message.channel.typing():
+                    resp = self._claude.messages.create(
+                        model="claude-haiku-4-5",
+                        max_tokens=800,
+                        system="You are Miles, an IT support assistant for Superior Networks LLC. Be concise and professional.",
+                        messages=[{"role": "user", "content": prompt}]
+                    )
+                    ai_reply = resp.content[0].text.strip()
+                await message.reply(f"🤖 **Miles (AI):**\n{ai_reply}", mention_author=False)
+            except Exception as e:
+                await message.reply(f"❌ AI request failed: {e}")
+            return True
+
+        # ── unrecognized instruction — send to Claude as a general question ──
+        full_prompt = f"{instruction}\n\n{body}".strip() if body else instruction
+        if self._claude:
+            try:
+                async with message.channel.typing():
+                    resp = self._claude.messages.create(
+                        model="claude-haiku-4-5",
+                        max_tokens=800,
+                        system="You are Miles, an IT support assistant for Superior Networks LLC. Be concise and professional.",
+                        messages=[{"role": "user", "content": full_prompt}]
+                    )
+                    ai_reply = resp.content[0].text.strip()
+                await message.reply(f"🤖 **Miles (AI):**\n{ai_reply}", mention_author=False)
+                return True
+            except Exception as e:
+                print(f"[Miles] Fallback AI error: {e}")
+        return False
+
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         """Main message listener"""
@@ -766,6 +945,23 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
         
         user_id = message.author.id
         content = message.content.strip()
+
+        # ── Miles:/AI: command prefix detection ──────────────────────────────
+        # Matches: 'Miles: <instruction>' or 'AI: <instruction>'
+        # Can appear anywhere in the message (inline with a note or standalone)
+        miles_match = re.search(
+            r'(?im)^(?:miles|ai)\s*:\s*(.+?)(?:\n|$)',
+            content
+        )
+        if miles_match:
+            instruction = miles_match.group(1).strip()
+            # Body = everything before the Miles:/AI: line
+            body = content[:miles_match.start()].strip()
+            handled = await self._handle_miles_command(message, instruction, body)
+            if handled:
+                return
+            # If not handled, fall through to normal routing with body only
+            content = body if body else content
         
         # Try enhanced parsing first (one-shot)
         if user_id not in self.conversations:
