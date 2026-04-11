@@ -33,6 +33,7 @@ Change Log:
   2026-04-09 v2.0.0 - Enhanced parsing, scheduling, and natural language support
   2026-04-11 v2.0.1 - Fixed update detection: now matches 'add to ticket N', 'note on N', bare '#N' (Dwain Henderson Jr)
   2026-04-11 v2.0.2 - Fixed 400 error on note POST: detailDescriptionFlag must be True (Dwain Henderson Jr)
+  2026-04-11 v2.0.3 - Auto-bullet multi-line notes; strip formatting instructions like 'list in bullet style' (Dwain Henderson Jr)
 """
 
 import re
@@ -585,6 +586,25 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
             # Fall back to conversational flow
             await self._start_conversational_flow(message, parsed)
 
+    def _format_note(self, note: str) -> str:
+        """Format note text: strip formatting instructions and auto-bullet multi-line notes."""
+        # Detect and remove any line that says 'list in bullet style' (case-insensitive, anywhere)
+        bullet_instruction = re.search(
+            r'(?im)^\s*list\s+(?:it\s+)?in\s+bullet(?:\s+style|s)?\.?\s*$', note
+        )
+        wants_bullets = bool(bullet_instruction)
+        if bullet_instruction:
+            note = (note[:bullet_instruction.start()] + note[bullet_instruction.end():]).strip()
+
+        # Split into non-empty lines
+        lines = [ln.strip() for ln in note.splitlines() if ln.strip()]
+
+        if len(lines) <= 1:
+            return note  # Single line — no formatting needed
+
+        # Multi-line: always format as bullet list (whether or not instruction was given)
+        return '\n'.join(f'• {ln}' for ln in lines)
+
     async def _handle_ticket_update(self, message: discord.Message, ticket_id: int, note: str):
         """Add a note to an existing ConnectWise ticket"""
         if not note:
@@ -607,6 +627,8 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
         company_name = ticket.get("company", {}).get("name", "Unknown")
         summary = ticket.get("summary", "")
 
+        # Format note: auto-bullet multi-line notes, strip formatting instructions
+        note = self._format_note(note)
         # Append Discord image/file attachments to the note
         if message.attachments:
             att_lines = [f"[Attachment from {message.author.name}]: {att.url}" for att in message.attachments]
