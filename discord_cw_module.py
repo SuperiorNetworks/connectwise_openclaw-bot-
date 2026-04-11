@@ -31,6 +31,7 @@ Dependencies:
 
 Change Log:
   2026-04-09 v2.0.0 - Enhanced parsing, scheduling, and natural language support
+  2026-04-11 v2.0.1 - Fixed update detection: now matches 'add to ticket N', 'note on N', bare '#N' (Dwain Henderson Jr)
 """
 
 import re
@@ -543,12 +544,30 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
     
     async def handle_ticket_request(self, message: discord.Message, text: str):
         """Try to parse and handle a complete ticket request"""
-        # Check for update ticket command first
-        update_match = re.search(r'(?i)update\s+ticket\s+#?(\d+)', text)
+        # Check for update/note ticket command first
+        # Matches: update ticket 31666, add to ticket 31666, note on ticket 31666,
+        #          add note to ticket 31666, #31666, ticket 31666 - <note>
+        update_match = re.search(
+            r'(?i)(?:update|add(?:\s+(?:a\s+)?note)?(?:\s+to)?|note(?:\s+on)?(?:\s+to)?)\s+ticket\s+#?(\d{4,6})\b',
+            text
+        )
+        if not update_match:
+            # Also match bare '#31666' or 'ticket 31666' at start/anywhere
+            update_match = re.search(r'(?i)\bticket\s+#?(\d{4,6})\b', text)
+        if not update_match:
+            update_match = re.search(r'#(\d{4,6})\b', text)
         if update_match:
             ticket_id = int(update_match.group(1))
-            # Strip the "update ticket XXXXX" prefix to get the note text
-            note_text = re.sub(r'(?i)update\s+ticket\s+#?\d+\s*', '', text).strip()
+            # Strip the ticket reference prefix to get the note text
+            note_text = re.sub(
+                r'(?i)(?:update|add(?:\s+(?:a\s+)?note)?(?:\s+to)?|note(?:\s+on)?(?:\s+to)?)\s+ticket\s+#?\d{4,6}\s*[-:\s]*',
+                '', text
+            ).strip()
+            # Also strip bare 'ticket NNNNN' or '#NNNNN' prefix if note_text still equals original
+            if not note_text or note_text == text:
+                note_text = re.sub(r'(?i)\bticket\s+#?\d{4,6}\s*[-:\s]*', '', text).strip()
+            if not note_text or note_text == text:
+                note_text = re.sub(r'#\d{4,6}\s*[-:\s]*', '', text).strip()
             await self._handle_ticket_update(message, ticket_id, note_text)
             return
 
