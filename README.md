@@ -1,254 +1,165 @@
-# Discord Conversational Ticket Bot for ConnectWise
+# ConnectWise Discord Ticket Bot (Miles)
 
-A flexible, conversational Discord bot that creates and updates ConnectWise service tickets with natural language input—no rigid format required.
+A conversational Discord bot that acts as an intelligent bridge between Discord and ConnectWise Manage. It uses natural language processing (and Claude AI) to parse free-form messages into structured ConnectWise tickets, schedule entries, and ticket notes.
 
-## Features
+**Current Version:** v2.0.4
 
-- **Conversational Flow**: Ask clarifying questions instead of rigid formats
-- **Flexible Input**: Start with a client name or ticket number—bot guides the rest
-- **Time Tracking**: Automatically creates billable time entries when hours are specified
-- **Context Aware**: Maintains per-user conversation state; switch between create/update mid-conversation
-- **Deep Links**: Generates proper ConnectWise v2025_1 deep links with LZMA compression
-- **Smart Parsing**: Auto-detects priorities, extracts time notation (hours/minutes), finds client names
-- **Error Handling**: Graceful error responses with actionable feedback
+---
 
-## Installation
+## Key Features
 
-### Prerequisites
+- **One-Shot Ticket Creation:** Type a single message like `"Create a ticket for Positive Electric with subject Server Down, description Main file server offline, schedule for tomorrow at 2pm, 5 hours, high priority"` and the bot extracts all fields and creates the ticket instantly.
+- **Conversational Fallback:** If you just type `"Positive Electric"`, the bot will ask you step-by-step for the subject, description, and time to log.
+- **Smart Ticket Updates:** Type `add to ticket 31666 - Rebooted the server` or just `#31666` to append notes directly to the ConnectWise ticket's Discussion tab.
+- **Inline Image Uploads:** Paste an image into Discord while creating or updating a ticket, and the bot automatically uploads it as an inline document in ConnectWise.
+- **Miles / AI Command System:** Prefix any message with `Miles:` or `AI:` to trigger Claude AI for tasks like summarizing tickets, translating text, or formatting notes.
+- **Natural Language Dates:** Understands "tomorrow at 2pm", "next Friday", "in 3 hours", etc.
+- **Deep Linking:** Generates direct `v2025_1` ConnectWise deep links for every created or updated ticket.
 
-- Python 3.9+
-- discord.py
-- requests
+---
 
-### Setup
+## Usage Guide
 
-1. **Clone or copy the module:**
-   ```bash
-   git clone https://github.com/your-org/discord-cw-ticket-bot.git
-   cd discord-cw-ticket-bot
-   ```
+### 1. Create a New Ticket
 
-2. **Create virtual environment:**
-   ```bash
-   python3 -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-   ```
+You can provide all information at once, or let the bot guide you.
 
-3. **Install dependencies:**
-   ```bash
-   pip install discord.py requests
-   ```
-
-4. **Configure:**
-   - Copy `config/discord_cw_ticket_config.json.template` → `config/discord_cw_ticket_config.json`
-   - Edit with your ConnectWise credentials and Discord settings:
-     ```json
-     {
-       "discord_channel_id": "YOUR_CHANNEL_ID",
-       "discord_guild_id": "YOUR_GUILD_ID",
-       "cw_base_url": "https://na.myconnectwise.net/v4_6_release/apis/3.0",
-       "company_mapping": {
-         "Client A": 12345,
-         "Client B": 12346
-       },
-       "priority_ids": {
-         "critical": 6,
-         "high": 15,
-         "medium": 8,
-         "low": 7
-       }
-     }
-     ```
-
-5. **Run:**
-   ```bash
-   python3 discord_ticket_listener_v2.py
-   ```
-
-## Usage
-
-### Create a New Ticket
-
-```
-You: Client A
-Bot: 📋 Subject for Client A?
-
+**Conversational Flow:**
+```text
+You: Positive Electric
+Bot: 📋 Subject for Positive Electric?
 You: Server down
 Bot: 📝 Description/Details?
-
 You: Main file server offline, preventing access to shared drives
 Bot: ⏱️ Time to log? (or 'skip')
-
 You: 5 hours
 Bot: ✅ Ticket #31642 Created
-     Client: Client A
-     Priority: Medium
-     Time: 5.0 hours
 ```
 
-### Add Note to Existing Ticket
-
+**One-Shot Flow:**
+```text
+You: Create a ticket for Positive Electric. Subject: Server down. Description: Main file server offline. Log 5 hours.
+Bot: ✅ Ticket #31642 Created
 ```
-You: #31641
-Bot: 📝 Note to add?
 
-You: I rebooted the server and ran diagnostics
+### 2. Add a Note to an Existing Ticket
+
+You can reference a ticket using `#12345`, `ticket 12345`, or `add to ticket 12345`.
+
+**Direct Note:**
+```text
+You: add to ticket 31666 - I rebooted the server and ran diagnostics
 Bot: ⏱️ Time to log? (or 'skip')
-
 You: 2.5 hours
-Bot: ✅ Note Added to Ticket #31641
-     Time Entry: ✅ 2.5 hours
+Bot: ✅ Note Added to Ticket #31666
 ```
 
-### Switch Conversations Mid-Flow
-
-```
-You: [In middle of creating ticket for Company A]
-You: New ticket for Client B
-Bot: [Abandons Company A flow, starts new for Adaptive Development]
-
-OR
-
-You: #31641
-Bot: [Switches to update mode for ticket #31641]
+**Conversational Note:**
+```text
+You: #31666
+Bot: 📝 What update should I add to ticket #31666?
+You: Server is back online
+Bot: ⏱️ Time to log? (or 'skip')
+You: skip
+Bot: ✅ Note Added to Ticket #31666
 ```
 
-## Configuration
+### 3. Miles / AI Commands
 
-### discord_cw_ticket_config.json
+Prefix any message with `Miles:` or `AI:` to trigger the AI command system.
 
+| Command | Description |
+|---|---|
+| `Miles: help` | Posts the command reference list |
+| `Miles: summarize ticket 31666` | Fetches the ticket and posts a Claude-written 2-3 sentence summary |
+| `Miles: translate to Spanish` | Translates the text above the command to Spanish |
+| `Miles: add a priority note at the top` | Prepends a `⚠️ PRIORITY` header to the text above |
+| `Miles: list in bullet style` | Formats the text above as a bullet list before posting |
+| `Miles: numbered list` | Formats the text above as a numbered list before posting |
+| `Miles: send to AI <question>` | Free-form question — Claude responds directly in Discord |
+
+**Combining AI commands with ticket notes:**
+You can put an instruction on the last line of a ticket update. The bot will strip the instruction, format the note, and post it to ConnectWise.
+```text
+You: add to ticket 31666 - Rebooted router
+Cleared DNS cache
+All systems nominal
+Miles: list in bullet style
+
+Bot: ✅ Note Added to Ticket #31666 (Formatted as a bulleted list)
+```
+
+---
+
+## Setup & Installation
+
+### 1. Prerequisites
+- Python 3.10+
+- A Discord Bot Token (with Message Content Intent enabled)
+- ConnectWise Manage API Credentials (Public/Private Key, Client ID)
+- Anthropic API Key (for Claude AI features)
+
+### 2. Installation
+```bash
+git clone https://github.com/SuperiorNetworks/connectwise_openclaw-bot-.git
+cd connectwise_openclaw-bot-
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+pip install anthropic  # Required for AI features
+```
+
+### 3. Configuration
+Copy the template config file and add your credentials:
+```bash
+cp config/discord_cw_ticket_config.json.template config/discord_cw_ticket_config.json
+```
+
+Edit `config/discord_cw_ticket_config.json`:
 ```json
 {
-  "discord_channel_id": "1491487503339884825",
-  "discord_guild_id": "445019596139921408",
-  "discord_channel_name": "cw-ticketing",
+  "discord_token": "YOUR_DISCORD_BOT_TOKEN",
+  "discord_channel_id": "123456789012345678",
   "cw_base_url": "https://na.myconnectwise.net/v4_6_release/apis/3.0",
-  "default_priority_id": 8,
-  "default_priority_name": "Medium",
+  "cw_company": "your_cw_company_id",
+  "cw_public_key": "your_public_key",
+  "cw_private_key": "your_private_key",
+  "cw_client_id": "your_client_id",
+  "anthropic_api_key": "sk-ant-...",
   "company_mapping": {
     "Client A": 12345,
-    "Client B": 12346,
-    "Client C": 12347
-  },
-  "priority_ids": {
-    "critical": 6,
-    "high": 15,
-    "medium": 8,
-    "low": 7
+    "Client B": 12346
   }
 }
 ```
+*(Note: Do not commit your actual config file to version control. It is ignored by `.gitignore`.)*
 
-## Conversation Flow States
-
-### Create Ticket Flow
-```
-company → subject → description → time → [TICKET CREATED]
-```
-
-### Update Ticket Flow
-```
-ticket_id → note → time → [NOTE + TIME ENTRY CREATED]
-```
-
-### Mid-Conversation Switches
-- Saying "New ticket for [Client]" switches to create flow
-- Saying "#[number]" switches to update flow
-- Previous conversation state is discarded
-
-## API Integration
-
-### ConnectWise Endpoints Used
-
-| Operation | Endpoint | Method |
-|-----------|----------|--------|
-| Create Ticket | `/service/tickets` | POST |
-| Add Note | `/service/tickets/{id}/notes` | POST |
-| Create Time Entry | `/schedule/entries` | POST |
-
-### Authentication
-
-Uses Basic Auth with ConnectWise credentials:
-```
-Authorization: Basic base64(company+public_key:private_key)
-clientId: [uuid]
-```
-
-## Features Detail
-
-### Smart Priority Detection
-Automatically detects priority from description:
-- `critical` / `p1` → Critical
-- `high` / `p2` → High
-- `medium` / `p3` → Medium (default)
-- `low` / `p4` → Low
-
-### Time Notation Parsing
-Supports flexible time input:
-- `5 hours` → 5.0
-- `2.5 hrs` → 2.5
-- `30 minutes` → 0.5
-- `90 mins` → 1.5
-
-### Deep Link Generation
-Generates v2025_1 format deep links:
-- JSON state object with ticket ID, member, timestamp
-- LZMA compression (512KB dictionary)
-- Custom Base64 encoding (ConnectWise alphabet)
-- Direct browser access via `https://na.myconnectwise.net/v2025_1/...`
-
-## Error Handling
-
-- **Client not found**: Asks user to clarify which client
-- **Invalid time format**: Suggests correct format
-- **API errors**: Graceful fallback with error details
-- **Schedule entry failures**: Ticket created successfully, warns about time entry
-
-## Systemd Service (Optional)
-
-Deploy as background service on Linux:
-
-```ini
-[Unit]
-Description=Discord CW Ticket Bot
-After=network.target
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/path/to/bot
-ExecStart=/path/to/venv/bin/python3 discord_ticket_listener_v2.py
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Enable:
+### 4. Running the Bot
 ```bash
-sudo systemctl enable discord-ticket-bot
-sudo systemctl start discord-ticket-bot
+python3 discord_ticket_bot.py
 ```
 
-## Logging
+---
 
-Bot logs to stdout/journal with timestamps:
-```
-[2026-04-08T22:45:31.123456] User.name: Positive Electric
-✅ Created ticket #31642 for Positive Electric + 5.0h time entry
-```
+## Systemd Service Deployment (Linux)
 
-## Token Cost
+To run the bot continuously in the background on a Linux server:
 
-- **Per-action estimate**: ~450 tokens (5 conversation exchanges)
-- **Compare to rigid format**: ~230 tokens (single message parse)
-- **Trade-off**: More tokens for zero format restrictions
+1. Edit `discord-ticket-bot.service` to match your installation paths.
+2. Copy it to systemd:
+   ```bash
+   sudo cp discord-ticket-bot.service /etc/systemd/system/
+   ```
+3. Enable and start the service:
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl enable discord-ticket-bot
+   sudo systemctl start discord-ticket-bot
+   ```
 
-## License
+---
+
+## License & Support
 
 © 2026 Superior Networks LLC
-
-## Support
-
 Contact: Your MSP Administrator
