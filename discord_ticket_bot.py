@@ -92,10 +92,10 @@ class DiscordTicketBotV2(commands.Cog):
     
     def _setup_cw_auth(self):
         """Setup ConnectWise authentication headers"""
-        company = "superiornet"
-        public_key = "3FkwDGYM7Ob33x4v"
-        private_key = "Ve0RSVdznQW95Own"
-        client_id = "2306df36-0849-4d92-a518-ba612e892c1d"
+        company = self.config.get("cw_company", "YOUR_COMPANY")
+        public_key = self.config.get("cw_public_key", "YOUR_PUBLIC_KEY")
+        private_key = self.config.get("cw_private_key", "YOUR_PRIVATE_KEY")
+        client_id = self.config.get("cw_client_id", "YOUR_CLIENT_ID")
         
         auth_str = base64.b64encode(f"{company}+{public_key}:{private_key}".encode()).decode()
         

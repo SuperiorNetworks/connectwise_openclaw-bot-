@@ -2,6 +2,21 @@
 
 All notable changes to the Discord Conversational Ticket Bot will be documented in this file.
 
+## [2.0.1] - 2026-04-11
+
+### Fixed
+- **JSON Parse Error** — Fixed a bug where `memory/.dreams/short-term-recall.json` contained non-ASCII characters causing OpenClaw to fail parsing JSON payloads. Deployed a cron-based sanitizer (`openclaw_sanitizer.py`) to continuously clean the file.
+- **Bot Authentication** — Corrected the Discord bot token for the Miles bot to ensure proper authentication and connection.
+- **Channel ID Type Mismatch** — Fixed an issue where channel IDs were being compared as strings instead of integers, preventing the bot from responding in the correct channel.
+- **Ticket ID Reference** — Fixed `Ticket #None` issue by correctly referencing the `id` field instead of `ticketNumber` in the ConnectWise API response.
+- **Deep Link URL Format** — Updated the ConnectWise deep link generation to use a stable and reliable format (`fv_sr100_request.rails?service_recid=TICKET_ID`).
+
+### Added
+- **Enhanced Natural Language Parsing** — Added over 20 IT action verbs, lead-in phrase stripping, and sentence-based fallback for more robust ticket creation without requiring pipe separators.
+- **Summary/Title Label Parsing** — Added support for parsing `Summary:` or `Title:` labels in messages. Text after the label maps directly to the ticket summary, and remaining text goes into the discussion note.
+- **Inline Image Uploads** — Implemented inline image uploading via the ConnectWise Documents API (`POST /system/documents` and `POST /service/tickets/{id}/documents`). Images sent via Discord now appear inline in the ConnectWise ticket discussion body, rather than as URL text.
+- **Ticket Management Methods** — Added `update_ticket()` and `get_ticket()` methods to the ConnectWise module for improved ticket handling.
+
 ## [1.0.0] - 2026-04-08
 
 ### Added

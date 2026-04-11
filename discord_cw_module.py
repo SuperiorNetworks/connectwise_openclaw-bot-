@@ -1,486 +1,745 @@
 """
-Discord Conversational Ticket Bot Module for ConnectWise
+Discord Conversational Ticket Bot Module v2 - Enhanced Parsing & Scheduling
 
-This module provides the core bot functionality for creating and updating
-ConnectWise tickets via Discord with conversational, flexible input.
+This module extends the core bot with:
+- One-shot prompt parsing (extract all info from single message)
+- Calendar scheduling integration
+- Natural language date/time parsing
+- Smarter context extraction
 
-Usage:
-    from discord_cw_module import DiscordTicketBotV2
-    
-    bot = DiscordTicketBotV2(config)
-    # ... attach to Discord bot as Cog
+Core Features:
+  - Parse "Create ticket for [Client] with subject [...], description [...], schedule [date/time]"
+  - Auto-schedule appointments in ConnectWise
+  - Extract structured data from free-form text
+  - Fall back to conversational flow if parsing incomplete
+
+Input:
+  - Discord bot instance
+  - ConnectWise API credentials (via config)
+  - User messages (Discord channel)
+
+Output:
+  - Created/updated tickets in ConnectWise
+  - Scheduled appointments (calendar entries)
+  - Discord confirmation embeds with links
+
+Dependencies:
+  - discord.py 2.3.2+
+  - requests
+  - dateutil (for natural language date parsing)
+  - re, base64, lzma, json
+
+Change Log:
+  2026-04-09 v2.0.0 - Enhanced parsing, scheduling, and natural language support
 """
 
-import discord
-from discord.ext import commands
-import requests
+import re
 import json
 import base64
 import lzma
-import re
-from datetime import datetime, timedelta
-from typing import Optional, Dict, Any, Tuple
+import requests
+from datetime import datetime, timedelta, time, time
+from typing import Optional, Tuple, Dict, Any
+try:
+    from dateutil.parser import parse as parse_date
+    from dateutil.relativedelta import relativedelta
+except ImportError:
+    parse_date = None
+    relativedelta = None
+import discord
+from discord.ext import commands
 
-class DiscordTicketBotV2(commands.Cog):
-    """Conversational Discord bot for ConnectWise ticket management"""
-    
-    CW_BASE64_ALPHA = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_"
+
+class DiscordTicketBotV2Enhanced(commands.Cog):
+    """Enhanced ticket bot with one-shot parsing and scheduling"""
     
     def __init__(self, bot: commands.Bot, config: Dict[str, Any]):
-        """
-        Initialize bot with configuration
-        
-        Args:
-            bot: Discord bot instance
-            config: Configuration dict with channel IDs, CW credentials, company mapping
-        """
         self.bot = bot
         self.config = config
-        self.cw_auth = self._setup_cw_auth()
-        self.company_map = config.get("company_mapping", {})
+        self.channel_id = int(config.get("discord_channel_id", 0))
+        self.guild_id = config.get("discord_guild_id")
+        
+        # CW API config
+        self.cw_base_url = config.get("cw_base_url", "https://na.myconnectwise.net/v4_6_release/apis/3.0")
+        self.cw_company = config.get("cw_company")
+        self.cw_public_key = config.get("cw_public_key")
+        self.cw_private_key = config.get("cw_private_key")
+        self.cw_client_id = config.get("cw_client_id")
+        self.cw_member_id = config.get("cw_member_id")
+        
+        self.company_mapping = config.get("company_mapping", {})
         self.priority_ids = config.get("priority_ids", {})
-        self.default_priority = config.get("default_priority_id", 8)
-        self.channel_id = int(config.get("discord_channel_id"))
+        self.default_priority_id = config.get("default_priority_id", 8)
         
-        # Per-user conversation state
-        self.conversations: Dict[int, Dict[str, Any]] = {}
+        # Conversation state
+        self.conversations = {}
     
-    def _cw_base64_encode(self, data: bytes) -> str:
-        """Encode bytes using ConnectWise's custom Base64 alphabet"""
-        encoded = base64.b64encode(data).decode('ascii')
-        encoded = encoded.replace('+', '$').replace('/', '_')
-        return encoded.rstrip('=')
+    # ============================================================================
+    # ENHANCED PARSING - One-shot extraction
+    # ============================================================================
     
-    def _generate_cw_link(self, ticket_id: int) -> str:
+    def parse_full_ticket_request(self, text: str) -> Dict[str, Any]:
         """
-        Generate ConnectWise v2025_1 deep link for a ticket
+        Parse a complete ticket request from a single message.
         
-        Args:
-            ticket_id: Numeric ticket ID
-            
-        Returns:
-            Full deep link URL
+        Returns dict with extracted fields:
+        {
+            "client_name": "Positive Electric",
+            "subject": "...",
+            "description": "...",
+            "hours": 4,
+            "schedule_date": datetime,
+            "schedule_time": time,
+            "priority": "medium",
+            "complete": bool  # True if all required fields found
+        }
         """
-        import time
-        import random
-        
-        state = {
-            "ticketId": ticket_id,
-            "memberId": "DHenderson",
-            "timestamp": int(time.time() * 1000),
-            "random": random.randint(0, 2147483647)
+        result = {
+            "client_name": None,
+            "subject": None,
+            "description": None,
+            "hours": None,
+            "schedule_date": None,
+            "schedule_time": None,
+            "priority": None,
+            "complete": False,
+            "note_body": None
         }
         
-        json_str = json.dumps(state, separators=(',', ':'))
-        json_bytes = json_str.encode('utf-8')
-        compressed = lzma.compress(json_bytes, format=lzma.FORMAT_ALONE, preset=1)
-        encoded = self._cw_base64_encode(compressed)
+        # Extract client name
+        client_name = self._extract_client_name(text)
+        if client_name:
+            result["client_name"] = client_name
         
-        return f"https://na.myconnectwise.net/v2025_1/ConnectWise.aspx?locale=en_US#{encoded}??ServiceTicket"
+        # Extract subject (first sentence, or after "subject:" keyword)
+        subject = self._extract_subject(text)
+        if subject:
+            result["subject"] = subject
+        
+        # Extract description (multiple sentences after subject)
+        description = self._extract_description(text)
+        if description:
+            result["description"] = description
+        
+        # Extract hours/time worked
+        hours = self._extract_hours(text)
+        if hours:
+            result["hours"] = hours
+        
+        # Extract scheduled date/time
+        schedule_dt = self._extract_schedule_datetime(text)
+        if schedule_dt:
+            result["schedule_date"] = schedule_dt.date()
+            result["schedule_time"] = schedule_dt.time()
+        
+        # Extract priority
+        priority = self._extract_priority(text)
+        if priority:
+            result["priority"] = priority
+        
+        # Check if we have minimum required fields
+        note_body = self._extract_note_body(text)
+        if note_body:
+            result["note_body"] = note_body
+        # Ticket is complete with just client + subject (description is optional)
+        result["complete"] = bool(result["client_name"] and result["subject"])
+        
+        return result
     
-    def _setup_cw_auth(self) -> Dict[str, str]:
-        """Setup ConnectWise authentication headers from environment or config"""
-        company = self.config.get("cw_company", "superiornet")
-        public_key = self.config.get("cw_public_key")
-        private_key = self.config.get("cw_private_key")
-        client_id = self.config.get("cw_client_id")
+    def _extract_client_name(self, text: str) -> Optional[str]:
+        """Extract client name from text"""
+        # Look for exact matches first
+        for company_name in self.company_mapping.keys():
+            if re.search(rf'\b{re.escape(company_name)}\b', text, re.IGNORECASE):
+                return company_name
         
-        if not all([public_key, private_key, client_id]):
-            raise ValueError("Missing ConnectWise credentials in config")
+        # Fuzzy match if no exact match
+        words = text.split()
+        for company_name in self.company_mapping.keys():
+            company_words = company_name.lower().split()
+            if any(word.lower() in [w.lower() for w in words] for word in company_words):
+                return company_name
         
-        auth_str = base64.b64encode(
-            f"{company}+{public_key}:{private_key}".encode()
+        return None
+    
+    def _extract_subject(self, text: str) -> Optional[str]:
+        """Extract subject (usually first meaningful sentence)"""
+        # Look for "subject:" keyword
+        match = re.search(r'(?:summary|title|subject)\s*:\s*([^\n]+)', text, re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+
+        # Strip lead-in phrases like "make a X ticket", "create a ticket for X"
+        clean = re.sub(r'(?i)^(make|create|open|log|submit|add|new)\s+(a\s+|an\s+)?[\w\s]+?ticket\.?\s*', '', text).strip()
+        clean = re.sub(r'(?i)^(create|open|log|submit)\s+(a\s+|an\s+)?new\s+ticket\s+(for\s+[\w\s]+?)?[.:]?\s*', '', clean).strip()
+
+        # Strip client name from start
+        client = self._extract_client_name(text)
+        if client and clean.lower().startswith(client.lower()):
+            clean = clean[len(client):].lstrip(', .')
+
+        # Expanded verb list covering IT tasks
+        verbs = ('hang|mount|install|replace|repair|upgrade|configure|setup|troubleshoot|diagnose'
+                 '|reformat|format|rebuild|migrate|move|add|remove|delete|update|patch|fix|restore'
+                 '|backup|deploy|provision|connect|disconnect|reset|image|wipe|clone|transfer'
+                 '|set up|put|send|check|review|audit|test|verify|enable|disable')
+        match = re.search(r'(' + verbs + r')[^.!?\n]+', clean, re.IGNORECASE)
+        if match:
+            sentence = match.group(0).strip()
+            words = sentence.split()
+            if len(words) > 15:
+                sentence = " ".join(words[:15])
+            return sentence
+
+        # Final fallback: use first sentence of cleaned text
+        first_sentence = re.split(r'[.!?\n]', clean)[0].strip()
+        if len(first_sentence) > 5:
+            words = first_sentence.split()
+            if len(words) > 15:
+                first_sentence = " ".join(words[:15])
+            return first_sentence
+
+        return None
+    
+    def _extract_description(self, text: str) -> Optional[str]:
+        """Extract description (remaining details)"""
+        # Remove the subject from text
+        subject = self._extract_subject(text)
+        if subject:
+            text = text.replace(subject, "", 1)
+        
+        # Extract meaningful lines (skip dates/times)
+        lines = text.split('\n')
+        description_lines = []
+        
+        for line in lines:
+            line = line.strip()
+            # Skip empty, very short, or date/time patterns
+            if line and len(line) > 10 and not re.match(r'(thursday|monday|tuesday|wednesday|friday|saturday|sunday|\d{1,2}:\d{2}|am|pm)', line, re.IGNORECASE):
+                description_lines.append(f"• {line}")
+        
+        if description_lines:
+            return "\n".join(description_lines[:4])  # Max 4 bullets
+        
+        return None
+    
+
+    def _extract_note_body(self, text):
+        """Extract body text to post as a ticket note (everything after Summary:/Title: line)"""
+        # If there is a Summary:/Title: label, everything after that line is the note body
+        m = re.search(
+            r'(?:summary|title|subject)\s*:\s*[^\n]+\n(.*)',
+            text, re.IGNORECASE | re.DOTALL
+        )
+        if m:
+            body = m.group(1).strip()
+            if body:
+                return body
+        # Otherwise: everything after the subject sentence is the note body
+        subject = self._extract_subject(text)
+        if subject:
+            idx = text.lower().find(subject.lower())
+            if idx >= 0:
+                after = text[idx + len(subject):].strip().lstrip('.!?,;:\n ')
+                client = self._extract_client_name(text)
+                if client:
+                    after = re.sub(re.escape(client), '', after, flags=re.IGNORECASE).strip()
+                after = re.sub(
+                    r'(?i)^(make|create|open|log|submit)\s+(a\s+)?[\w\s]+?ticket\.?\s*',
+                    '', after
+                ).strip()
+                if len(after) > 5:
+                    return after
+        return None
+
+    def _extract_hours(self, text: str) -> Optional[float]:
+        """Extract hours worked"""
+        # Match patterns like "4 hours", "2.5 hrs", "30 minutes", etc.
+        match = re.search(r'(\d+(?:\.\d+)?)\s*(hours?|hrs?|h|minutes?|mins?)', text, re.IGNORECASE)
+        if match:
+            value = float(match.group(1))
+            unit = match.group(2).lower()
+            
+            if 'min' in unit:
+                return value / 60
+            return value
+        
+        return None
+    
+    def _extract_schedule_datetime(self, text: str) -> Optional[datetime]:
+        """Extract scheduled date and time"""
+        # Look for day names (Thursday, Friday, etc.)
+        day_pattern = r'\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b'
+        day_match = re.search(day_pattern, text, re.IGNORECASE)
+        
+        if not day_match:
+            return None
+        
+        day_name = day_match.group(1).lower()
+        
+        # Look for time pattern (9 am, 9:00 AM, 14:30, etc.)
+        # IMPORTANT: Require AM/PM for single-digit hours to avoid matching product numbers like "24-port"
+        time_pattern = r'(?:(\d{1,2}):(\d{2})|(\d{1,2})\s+(am|pm|a\.m|p\.m))'
+        time_match = re.search(time_pattern, text, re.IGNORECASE)
+        
+        if not time_match:
+            return None
+        
+        # Regex has 4 groups: (1) HH from HH:MM, (2) MM from HH:MM, (3) hour from "N am/pm", (4) am/pm
+        # Either groups 1+2 match (HH:MM format) OR groups 3+4 match ("N am/pm" format)
+        if time_match.group(1):  # HH:MM format matched
+            hour = int(time_match.group(1))
+            minute = int(time_match.group(2))
+            ampm = None
+        else:  # "N am/pm" format matched
+            hour = int(time_match.group(3))
+            minute = 0
+            ampm = time_match.group(4)
+        
+        # Convert to 24-hour if AM/PM specified
+        if ampm:
+            if 'p' in ampm.lower() and hour < 12:
+                hour += 12
+            elif 'a' in ampm.lower() and hour == 12:
+                hour = 0
+        
+        # Find the next occurrence of the day
+        days = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+        day_index = days.index(day_name)
+        today = datetime.now().replace(hour=hour, minute=minute, second=0, microsecond=0)
+        today_index = today.weekday()
+        
+        days_ahead = day_index - today_index
+        if days_ahead < 0:  # Target day already happened this week
+            days_ahead += 7
+        elif days_ahead == 0 and today.time() < time(hour, minute):
+            # Same day but time hasn't passed yet
+            pass
+        elif days_ahead == 0:
+            # Same day but time already passed
+            days_ahead = 7
+        
+        return today + timedelta(days=days_ahead)
+    
+    def _extract_priority(self, text: str) -> Optional[str]:
+        """Extract priority level"""
+        priority_keywords = {
+            r'\b(critical|emergency|urgent|p1)\b': 'critical',
+            r'\b(high|p2)\b': 'high',
+            r'\b(medium|p3|standard)\b': 'medium',
+            r'\b(low|p4|minor)\b': 'low'
+        }
+        
+        for pattern, priority in priority_keywords.items():
+            if re.search(pattern, text, re.IGNORECASE):
+                return priority
+        
+        return None
+    
+    # ============================================================================
+    # CONNECTWISE API - Ticket & Schedule Creation
+    # ============================================================================
+    
+    def create_ticket(self, company_id: int, subject: str, description: str, 
+                     priority_id: int, priority_name: str) -> Dict[str, Any]:
+        """Create a ticket in ConnectWise"""
+        auth = base64.b64encode(
+            f"{self.cw_company}+{self.cw_public_key}:{self.cw_private_key}".encode()
         ).decode()
         
-        return {
-            "Authorization": f"Basic {auth_str}",
-            "clientId": client_id,
+        headers = {
+            "Authorization": f"Basic {auth}",
+            "clientId": self.cw_client_id,
             "Accept": "application/json",
             "Content-Type": "application/json"
         }
-    
-    def _find_company_id(self, text: str) -> Tuple[Optional[int], Optional[str]]:
-        """
-        Extract company ID and name from text using fuzzy matching
-        
-        Args:
-            text: User input text
-            
-        Returns:
-            Tuple of (company_id, company_name) or (None, None)
-        """
-        text_lower = text.lower()
-        
-        for company_name, company_id in self.company_map.items():
-            if company_name.lower() in text_lower:
-                return company_id, company_name
-        
-        return None, None
-    
-    def _find_ticket_number(self, text: str) -> Optional[int]:
-        """Extract ticket number from text (e.g., #31641)"""
-        match = re.search(r'#(\d+)', text)
-        return int(match.group(1)) if match else None
-    
-    def _extract_hours(self, text: str) -> Optional[float]:
-        """
-        Extract hours from text supporting multiple formats
-        
-        Examples:
-            "5 hours" → 5.0
-            "2.5 hrs" → 2.5
-            "30 minutes" → 0.5
-        """
-        match = re.search(
-            r'(\d+(?:\.\d+)?)\s*(hr|hour|hrs|hours|min|minute|minutes)',
-            text.lower()
-        )
-        if match:
-            value = float(match.group(1))
-            unit = match.group(2)
-            return value / 60 if unit.startswith('min') else value
-        return None
-    
-    def _extract_priority(self, text: str) -> Tuple[int, str]:
-        """Extract priority from text (critical/high/medium/low or p1-p4)"""
-        text_lower = text.lower()
-        
-        if re.search(r'\bcritical\b|p1\b|p\s*1\b', text_lower):
-            return self.priority_ids.get("critical", 6), "Critical"
-        elif re.search(r'\bhigh\b|p2\b|p\s*2\b', text_lower):
-            return self.priority_ids.get("high", 15), "High"
-        elif re.search(r'\bmedium\b|p3\b|p\s*3\b', text_lower):
-            return self.priority_ids.get("medium", 8), "Medium"
-        elif re.search(r'\blow\b|p4\b|p\s*4\b', text_lower):
-            return self.priority_ids.get("low", 7), "Low"
-        
-        return self.default_priority, "Medium"
-    
-    def _create_schedule_entry(self, ticket_id: int, hours: float) -> Dict[str, Any]:
-        """Create a time entry in ConnectWise schedule"""
-        url = f"{self.config['cw_base_url']}/schedule/entries"
-        
-        now = datetime.utcnow()
-        end_time = now + timedelta(hours=hours)
-        
-        payload = {
-            "objectId": ticket_id,
-            "type": {"id": 4},  # Service ticket
-            "member": {"id": self.config.get("cw_member_id")},
-            "dateStart": now.isoformat() + "Z",
-            "dateEnd": end_time.isoformat() + "Z",
-            "status": {"id": 2}  # Firm
-        }
-        
-        try:
-            resp = requests.post(url, headers=self.cw_auth, json=payload, timeout=10)
-            resp.raise_for_status()
-            return {"status": "success", "entry_id": resp.json().get("id")}
-        except requests.exceptions.RequestException as e:
-            return {"status": "error", "error": f"Schedule entry failed: {str(e)}"}
-    
-    def create_ticket(
-        self,
-        company_id: int,
-        company_name: str,
-        summary: str,
-        description: str,
-        priority_id: int,
-        priority_name: str
-    ) -> Dict[str, Any]:
-        """
-        Create a ConnectWise ticket
-        
-        Returns:
-            Dict with status, ticket_id, and CW deep link
-        """
-        url = f"{self.config['cw_base_url']}/service/tickets"
         
         payload = {
             "company": {"id": company_id},
-            "summary": summary,
+            "summary": subject[:200],
             "initialDescription": description,
             "priority": {"id": priority_id}
         }
         
         try:
-            resp = requests.post(url, headers=self.cw_auth, json=payload, timeout=10)
+            resp = requests.post(
+                f"{self.cw_base_url}/service/tickets",
+                headers=headers,
+                json=payload,
+                timeout=10
+            )
             resp.raise_for_status()
-            
             ticket_data = resp.json()
-            ticket_id = ticket_data.get("id")
             
             return {
                 "status": "success",
-                "ticket_id": ticket_id,
-                "company_name": company_name,
-                "summary": summary,
-                "priority_name": priority_name,
-                "cw_link": self._generate_cw_link(ticket_id)
+                "ticket_id": ticket_data.get("id"),
+                "ticket_num": ticket_data.get("ticketNumber") or ticket_data.get("id"),
+                "cw_link": self._generate_deep_link(ticket_data.get("id"))
             }
-        except requests.exceptions.RequestException as e:
+        except Exception as e:
             return {
                 "status": "error",
-                "error": f"ConnectWise API failed: {str(e)}",
-                "company_name": company_name,
-                "summary": summary
+                "error": str(e)
             }
     
-    def add_note_to_ticket(
-        self,
-        ticket_id: int,
-        note_text: str,
-        hours: Optional[float] = None
-    ) -> Dict[str, Any]:
-        """
-        Add note to ticket and optionally create time entry
+    def create_schedule_entry(self, ticket_id: int, date: datetime.date, 
+                             time_obj: datetime.time) -> Dict[str, Any]:
+        """Schedule an appointment in ConnectWise"""
+        auth = base64.b64encode(
+            f"{self.cw_company}+{self.cw_public_key}:{self.cw_private_key}".encode()
+        ).decode()
         
-        Returns:
-            Dict with status, note text, and time entry status
-        """
-        url = f"{self.config['cw_base_url']}/service/tickets/{ticket_id}/notes"
+        headers = {
+            "Authorization": f"Basic {auth}",
+            "clientId": self.cw_client_id,
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+        }
+        
+        # Convert to UTC (assuming local time input)
+        # This is a simplification; you may need timezone handling
+        start_dt = datetime.combine(date, time_obj)
+        end_dt = start_dt + timedelta(hours=2)  # Default 2-hour appointment
         
         payload = {
-            "text": note_text,
-            "detailDescriptionFlag": True
+            "objectId": ticket_id,
+            "type": {"id": 4},  # Service ticket
+            "member": {"id": self.cw_member_id},
+            "dateStart": start_dt.isoformat() + "Z",
+            "dateEnd": end_dt.isoformat() + "Z",
+            "status": {"id": 2}  # Firm (scheduled)
         }
         
         try:
-            resp = requests.post(url, headers=self.cw_auth, json=payload, timeout=10)
+            resp = requests.post(
+                f"{self.cw_base_url}/schedule/entries",
+                headers=headers,
+                json=payload,
+                timeout=10
+            )
             resp.raise_for_status()
+            schedule_data = resp.json()
             
-            result = {
+            return {
                 "status": "success",
-                "ticket_id": ticket_id,
-                "note": note_text,
-                "cw_link": self._generate_cw_link(ticket_id)
+                "schedule_id": schedule_data.get("id"),
+                "scheduled_time": f"{date} @ {time_obj.strftime('%H:%M')}"
             }
-            
-            if hours and hours > 0:
-                schedule_result = self._create_schedule_entry(ticket_id, hours)
-                result["hours"] = hours
-                result["schedule_status"] = schedule_result.get("status")
-                if schedule_result.get("status") == "error":
-                    result["schedule_error"] = schedule_result.get("error")
-            
-            return result
-        except requests.exceptions.RequestException as e:
+        except Exception as e:
             return {
                 "status": "error",
-                "ticket_id": ticket_id,
-                "error": f"Failed to add note: {str(e)}"
+                "error": str(e)
             }
     
-    async def ask_question(self, message, question: str) -> None:
-        """Post a question to the Discord channel"""
-        await message.channel.send(f"**{question}**")
-    
-    async def process_create_flow(
-        self,
-        message,
-        user_id: int,
-        conv_state: Dict
-    ) -> None:
-        """Process ticket creation conversational flow"""
-        stage = conv_state.get("stage", "company")
-        data = conv_state.get("data", {})
-        
-        content = message.content.strip()
-        
-        if stage == "company":
-            company_id, company_name = self._find_company_id(content)
-            if not company_id:
-                await message.reply("❌ Client not recognized. Try again (e.g., 'Positive Electric')")
-                return
-            
-            data["company_id"] = company_id
-            data["company_name"] = company_name
-            conv_state["stage"] = "subject"
-            await self.ask_question(message, f"📋 Subject for {company_name}?")
-        
-        elif stage == "subject":
-            data["summary"] = content
-            conv_state["stage"] = "description"
-            await self.ask_question(message, "📝 Description/Details?")
-        
-        elif stage == "description":
-            data["description"] = content
-            priority_id, priority_name = self._extract_priority(content)
-            data["priority_id"] = priority_id
-            data["priority_name"] = priority_name
-            conv_state["stage"] = "time"
-            await self.ask_question(message, "⏱️ Time to log? (or 'skip')")
-        
-        elif stage == "time":
-            hours = None if content.lower() == "skip" else self._extract_hours(content)
-            
-            if hours is None and content.lower() != "skip":
-                await message.reply("❌ Could not parse hours. Try 'skip' or a number (e.g., '5 hours')")
-                return
-            
-            # Create ticket
-            result = self.create_ticket(
-                data["company_id"],
-                data["company_name"],
-                data["summary"],
-                data["description"],
-                data["priority_id"],
-                data["priority_name"]
+
+    def upload_image_to_ticket(self, ticket_id: int, image_url: str, filename: str = None) -> dict:
+        """Download a Discord image and upload it to ConnectWise as an inline ticket document.
+        Replicates the behavior of pasting a screenshot into the CW discussion editor."""
+        import requests as _req, io as _io, os as _os
+        auth = __import__('base64').b64encode(
+            f"{self.cw_company}+{self.cw_public_key}:{self.cw_private_key}".encode()
+        ).decode()
+        headers_auth = {
+            "Authorization": f"Basic {auth}",
+            "clientId": self.cw_client_id,
+        }
+        try:
+            img_resp = _req.get(image_url, timeout=30)
+            img_resp.raise_for_status()
+            img_data = img_resp.content
+            content_type = img_resp.headers.get('Content-Type', 'image/png')
+            if not filename:
+                filename = _os.path.basename(image_url.split('?')[0]) or 'attachment.png'
+            files = {'file': (filename, _io.BytesIO(img_data), content_type)}
+            data = {
+                'recordType': 'Ticket',
+                'recordId': str(ticket_id),
+                'title': filename,
+                'isPublic': 'true',
+            }
+            upload_resp = _req.post(
+                f"{self.cw_base_url}/system/documents",
+                headers=headers_auth,
+                files=files,
+                data=data,
+                timeout=30
             )
-            
-            if result.get("status") == "success":
-                ticket_id = result["ticket_id"]
-                
-                if hours and hours > 0:
-                    self._create_schedule_entry(ticket_id, hours)
-                
-                embed = discord.Embed(
-                    title=f"✅ Ticket #{ticket_id} Created",
-                    description=data["summary"],
-                    color=discord.Color.green(),
-                    url=result["cw_link"]
-                )
-                embed.add_field(name="Client", value=data["company_name"], inline=True)
-                embed.add_field(name="Priority", value=data["priority_name"], inline=True)
-                if hours and hours > 0:
-                    embed.add_field(name="Time", value=f"{hours} hours", inline=True)
-                embed.add_field(name="CW Link", value=f"[Open Ticket]({result['cw_link']})", inline=False)
-                
-                await message.reply(embed=embed, mention_author=False)
-                print(f"✅ Created ticket #{ticket_id} for {data['company_name']}")
-                
-                del self.conversations[user_id]
-            else:
-                embed = discord.Embed(
-                    title="❌ Failed to Create Ticket",
-                    description=result.get("error"),
-                    color=discord.Color.red()
-                )
-                embed.add_field(name="Client", value=data["company_name"], inline=True)
-                await message.reply(embed=embed, mention_author=False)
-                del self.conversations[user_id]
+            upload_resp.raise_for_status()
+            doc = upload_resp.json()
+            doc_id = doc.get('id')
+            print(f"  [image] Uploaded {filename} -> CW document #{doc_id} on ticket #{ticket_id}")
+            return {"status": "success", "doc_id": doc_id, "filename": filename}
+        except Exception as e:
+            print(f"  [image] Upload failed for {image_url}: {e}")
+            return {"status": "error", "error": str(e)}
+
+    def update_ticket(self, ticket_id: int, note: str, member_id: str = None) -> dict:
+        """Add a note/update to an existing ConnectWise ticket"""
+        auth = __import__('base64').b64encode(
+            f"{self.cw_company}+{self.cw_public_key}:{self.cw_private_key}".encode()
+        ).decode()
+
+        headers = {
+            "Authorization": f"Basic {auth}",
+            "clientId": self.cw_client_id,
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+        }
+
+        payload = {
+            "text": note,
+            "detailDescriptionFlag": False,
+            "internalAnalysisFlag": False,
+            "resolutionFlag": False
+        }
+        if member_id:
+            payload["member"] = {"identifier": member_id}
+
+        try:
+            resp = __import__('requests').post(
+                f"{self.cw_base_url}/service/tickets/{ticket_id}/notes",
+                headers=headers,
+                json=payload,
+                timeout=10
+            )
+            resp.raise_for_status()
+            note_data = resp.json()
+            return {"status": "success", "note_id": note_data.get("id")}
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
+
+    def get_ticket(self, ticket_id: int) -> dict:
+        """Fetch a ConnectWise ticket by ID"""
+        auth = __import__('base64').b64encode(
+            f"{self.cw_company}+{self.cw_public_key}:{self.cw_private_key}".encode()
+        ).decode()
+
+        headers = {
+            "Authorization": f"Basic {auth}",
+            "clientId": self.cw_client_id,
+            "Accept": "application/json"
+        }
+
+        try:
+            resp = __import__('requests').get(
+                f"{self.cw_base_url}/service/tickets/{ticket_id}",
+                headers=headers,
+                timeout=10
+            )
+            resp.raise_for_status()
+            return {"status": "success", "ticket": resp.json()}
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
+
+    def _generate_deep_link(self, ticket_id: int) -> str:
+        """Generate ConnectWise direct ticket link"""
+        return f"https://na.myconnectwise.net/v4_6_release/services/system_io/Service/fv_sr100_request.rails?service_recid={ticket_id}&companyName=superiornet"
+
+
+    # ============================================================================
+    # MESSAGE HANDLING
+    # ============================================================================
     
-    async def process_update_flow(
-        self,
-        message,
-        user_id: int,
-        conv_state: Dict
-    ) -> None:
-        """Process ticket update conversational flow"""
-        stage = conv_state.get("stage", "note")
-        data = conv_state.get("data", {})
+    async def handle_ticket_request(self, message: discord.Message, text: str):
+        """Try to parse and handle a complete ticket request"""
+        # Check for update ticket command first
+        update_match = re.search(r'(?i)update\s+ticket\s+#?(\d+)', text)
+        if update_match:
+            ticket_id = int(update_match.group(1))
+            # Strip the "update ticket XXXXX" prefix to get the note text
+            note_text = re.sub(r'(?i)update\s+ticket\s+#?\d+\s*', '', text).strip()
+            await self._handle_ticket_update(message, ticket_id, note_text)
+            return
+
+        parsed = self.parse_full_ticket_request(text)
         
-        content = message.content.strip()
+        if not parsed["client_name"]:
+            await message.reply("❌ Start with a client name (e.g., 'Positive Electric')")
+            return
         
-        if stage == "note":
-            data["note"] = content
-            conv_state["stage"] = "time"
-            await self.ask_question(message, "⏱️ Time to log? (or 'skip')")
+        # If complete, create ticket + schedule
+        if parsed["complete"]:
+            await self._create_ticket_and_schedule(message, parsed)
+        else:
+            # Fall back to conversational flow
+            await self._start_conversational_flow(message, parsed)
+
+    async def _handle_ticket_update(self, message: discord.Message, ticket_id: int, note: str):
+        """Add a note to an existing ConnectWise ticket"""
+        if not note:
+            await message.reply(f"📝 What update should I add to ticket #{ticket_id}?")
+            # Store in conversation state waiting for note text
+            self.conversations[message.author.id] = {
+                "mode": "update",
+                "stage": "note",
+                "data": {"ticket_id": ticket_id}
+            }
+            return
+
+        # Fetch ticket to confirm it exists and get client name
+        ticket_result = self.get_ticket(ticket_id)
+        if ticket_result["status"] != "success":
+            await message.reply(f"❌ Ticket #{ticket_id} not found in ConnectWise")
+            return
+
+        ticket = ticket_result["ticket"]
+        company_name = ticket.get("company", {}).get("name", "Unknown")
+        summary = ticket.get("summary", "")
+
+        # Append Discord image/file attachments to the note
+        if message.attachments:
+            att_lines = [f"[Attachment from {message.author.name}]: {att.url}" for att in message.attachments]
+            note = (note + "\n\n" + "\n".join(att_lines)).strip()
+        # Post the note
+        update_result = self.update_ticket(ticket_id, note)
+        if update_result["status"] != "success":
+            await message.reply(f"❌ Failed to update ticket: {update_result.get('error')}")
+            return
+
+        embed = discord.Embed(
+            title=f"✅ Ticket #{ticket_id} Updated",
+            description=summary,
+            color=discord.Color.blue(),
+            url=self._generate_deep_link(ticket_id)
+        )
+        embed.add_field(name="Client", value=company_name, inline=True)
+        embed.add_field(name="Note Added", value=note[:500], inline=False)
+        embed.add_field(name="Link", value=f"[Open in ConnectWise]({self._generate_deep_link(ticket_id)})", inline=False)
+        embed.set_footer(text=f"Updated by {message.author.name}")
+
+        await message.reply(embed=embed, mention_author=False)
+        print(f"✅ Updated ticket #{ticket_id} with note")
+    
+    async def _create_ticket_and_schedule(self, message: discord.Message, parsed: Dict[str, Any]):
+        """Create ticket and optionally schedule appointment"""
+        company_id = self.company_mapping.get(parsed["client_name"])
+        if not company_id:
+            await message.reply(f"❌ Client '{parsed['client_name']}' not found in mapping")
+            return
         
-        elif stage == "time":
-            hours = None if content.lower() == "skip" else self._extract_hours(content)
+        # Determine priority
+        priority_name = parsed["priority"] or "medium"
+        priority_id = self.priority_ids.get(priority_name, self.default_priority_id)
+        
+        # Create ticket
+        ticket_result = self.create_ticket(
+            company_id,
+            parsed["subject"],
+            parsed["description"],
+            priority_id,
+            priority_name
+        )
+        
+        if ticket_result["status"] != "success":
+            await message.reply(f"❌ Failed to create ticket: {ticket_result.get('error')}")
+            return
+        
+        ticket_id = ticket_result["ticket_id"]
+        
+        # Build response embed
+        embed = discord.Embed(
+            title=f"✅ Ticket #{ticket_result['ticket_num']} Created",
+            description=re.sub(r"^[:\s,.|]+", "", parsed["subject"]).strip() if parsed["subject"] else "",
+            color=discord.Color.green(),
+            url=ticket_result["cw_link"]
+        )
+        embed.add_field(name="Client", value=parsed["client_name"], inline=True)
+        embed.add_field(name="Priority", value=priority_name.capitalize(), inline=True)
+        
+        if parsed["hours"]:
+            embed.add_field(name="Hours Logged", value=f"{parsed['hours']} hrs", inline=True)
+        
+        # Schedule if date/time provided
+        if parsed["schedule_date"] and parsed["schedule_time"]:
+            schedule_result = self.create_schedule_entry(ticket_id, parsed["schedule_date"], parsed["schedule_time"])
             
-            if hours is None and content.lower() != "skip":
-                await message.reply("❌ Could not parse hours. Try 'skip' or a number (e.g., '5 hours')")
-                return
-            
-            # Add note and time entry
-            result = self.add_note_to_ticket(data["ticket_id"], data["note"], hours)
-            
-            if result.get("status") == "success":
-                embed = discord.Embed(
-                    title=f"✅ Note Added to Ticket #{result['ticket_id']}",
-                    description=result["note"],
-                    color=discord.Color.green(),
-                    url=result["cw_link"]
+            if schedule_result["status"] == "success":
+                embed.add_field(
+                    name="📅 Scheduled",
+                    value=schedule_result["scheduled_time"],
+                    inline=False
                 )
-                if hours and hours > 0:
-                    time_status = "✅" if result.get("schedule_status") == "success" else "⚠️"
-                    embed.add_field(name="Time Entry", value=f"{time_status} {hours} hours", inline=True)
-                embed.add_field(name="CW Link", value=f"[Open Ticket]({result['cw_link']})", inline=False)
-                
-                await message.reply(embed=embed, mention_author=False)
-                print(f"✅ Added note to ticket #{result['ticket_id']}")
-                
-                del self.conversations[user_id]
             else:
-                embed = discord.Embed(
-                    title="❌ Failed to Add Note",
-                    description=result.get("error"),
-                    color=discord.Color.red()
+                embed.add_field(
+                    name="⚠️ Scheduling Failed",
+                    value=schedule_result.get("error"),
+                    inline=False
                 )
-                embed.add_field(name="Ticket", value=f"#{data['ticket_id']}", inline=True)
-                await message.reply(embed=embed, mention_author=False)
-                del self.conversations[user_id]
+        
+        embed.add_field(name="Link", value=f"[Open in ConnectWise]({ticket_result['cw_link']})", inline=False)
+        embed.set_footer(text=f"Created by {message.author.name}")
+        
+        await message.reply(embed=embed, mention_author=False)
+        print(f"✅ Created ticket #{ticket_result['ticket_num']} with schedule")
+        # Post note body as text, then upload images as inline CW documents
+        note_parts = []
+        if parsed.get("note_body"):
+            note_parts.append(parsed["note_body"])
+        if note_parts:
+            self.update_ticket(ticket_id, '\n\n'.join(note_parts))
+            print(f"  Note posted to ticket #{ticket_result['ticket_num']}")
+        if message.attachments:
+            for att in message.attachments:
+                self.upload_image_to_ticket(ticket_id, att.url, att.filename)
+    
+    async def _start_conversational_flow(self, message: discord.Message, parsed: Dict[str, Any]):
+        """Fall back to conversational flow if info is incomplete"""
+        user_id = message.author.id
+        
+        self.conversations[user_id] = {
+            "mode": "create",
+            "stage": "subject" if not parsed["subject"] else ("description" if not parsed["description"] else "time"),
+            "data": {
+                "company_id": self.company_mapping.get(parsed["client_name"]),
+                "company_name": parsed["client_name"],
+                "subject": parsed["subject"],
+                "description": parsed["description"],
+                "hours": parsed["hours"],
+                "schedule_date": parsed["schedule_date"],
+                "schedule_time": parsed["schedule_time"]
+            }
+        }
+        
+        # Ask for missing field
+        if not parsed["subject"]:
+            await message.reply(f"📋 Subject for {parsed['client_name']}?")
+        elif not parsed["description"]:
+            await message.reply("📝 Description/Details?")
+        else:
+            await message.reply("⏱️ Time to log? (or 'skip')")
     
     @commands.Cog.listener()
     async def on_ready(self):
-        """Bot ready event"""
-        print(f"✅ Bot logged in as {self.bot.user}")
-        print(f"📍 Monitoring channel ID: {self.channel_id}")
+        """Bot ready"""
+        print(f"✅ Enhanced Bot v2 logged in as {self.bot.user}")
     
     @commands.Cog.listener()
-    async def on_message(self, message):
-        """Main message listener for ticket channel"""
+    async def on_message(self, message: discord.Message):
+        """Main message listener"""
         if message.author == self.bot.user or message.channel.id != self.channel_id:
             return
+        
+        print(f"\n[{datetime.now().isoformat()}] {message.author}: {message.content[:80]}")
         
         user_id = message.author.id
         content = message.content.strip()
         
-        print(f"\n[{datetime.now().isoformat()}] {message.author}: {content[:80]}")
-        
-        # Check for active conversation
-        if user_id in self.conversations:
-            conv_state = self.conversations[user_id]
-            
-            # Check for conversation switch
-            if re.search(r'\bnew\b.*\bticket\b', content, re.IGNORECASE):
-                company_id, company_name = self._find_company_id(content)
-                if company_id:
-                    self.conversations[user_id] = {
-                        "mode": "create",
-                        "stage": "subject",
-                        "data": {"company_id": company_id, "company_name": company_name}
-                    }
-                    await self.ask_question(message, f"📋 Subject for {company_name}?")
-                    return
-            
-            ticket_num = self._find_ticket_number(content)
-            if ticket_num:
-                self.conversations[user_id] = {
-                    "mode": "update",
-                    "stage": "note",
-                    "data": {"ticket_id": ticket_num}
-                }
-                await self.ask_question(message, "📝 Note to add?")
-                return
-            
-            # Continue current flow
-            if conv_state.get("mode") == "create":
-                await self.process_create_flow(message, user_id, conv_state)
-            elif conv_state.get("mode") == "update":
-                await self.process_update_flow(message, user_id, conv_state)
-        
+        # Try enhanced parsing first (one-shot)
+        if user_id not in self.conversations:
+            await self.handle_ticket_request(message, content)
         else:
-            # Start new conversation
-            ticket_num = self._find_ticket_number(content)
-            
-            if ticket_num:
-                self.conversations[user_id] = {
-                    "mode": "update",
-                    "stage": "note",
-                    "data": {"ticket_id": ticket_num}
-                }
-                await self.ask_question(message, "📝 Note to add?")
+            conv = self.conversations[user_id]
+            # Handle update note stage
+            if conv.get("mode") == "update" and conv.get("stage") == "note":
+                ticket_id = conv["data"]["ticket_id"]
+                del self.conversations[user_id]
+                await self._handle_ticket_update(message, ticket_id, content)
             else:
-                company_id, company_name = self._find_company_id(content)
-                if company_id:
-                    self.conversations[user_id] = {
-                        "mode": "create",
-                        "stage": "subject",
-                        "data": {"company_id": company_id, "company_name": company_name}
-                    }
-                    await self.ask_question(message, f"📋 Subject for {company_name}?")
-                else:
-                    await message.reply("❌ Start with a client name (e.g., 'Positive Electric') or ticket number (e.g., '#31641')")
+                # Handle conversational create flow
+                print(f"In active conversation (continuing flow)")
+
+
+def setup(bot: commands.Bot, config: Dict[str, Any]):
+    """Load cog into bot"""
+    bot.add_cog(DiscordTicketBotV2Enhanced(bot, config))
