@@ -253,6 +253,27 @@ TAXABLE: No
 - Ramble or over-explain
 - Use vague terms ("system" instead of server/workstation/network)
 
+## Advanced Features
+
+### Image Uploads
+You can paste images directly into Discord while creating or updating a ticket. The bot will automatically upload them to the ConnectWise ticket as inline images.
+
+### AI Assistance (Miles)
+You can use the `Miles:` or `AI:` prefix to have the bot format your notes or summarize tickets.
+
+**Formatting Notes:**
+```text
+add to ticket 31641 - Rebooted server
+Checked logs
+Everything is fine
+Miles: list in bullet style
+```
+
+**Summarizing Tickets:**
+```text
+Miles: summarize ticket 31641
+```
+
 ## Priority & Time Notation
 
 The bot supports automatic priority detection and flexible time input:
@@ -283,5 +304,5 @@ Otherwise, just start typing and the bot will guide you.
 
 ---
 
-**Last Updated:** April 8, 2026  
-**Version:** 1.0.0
+**Last Updated:** April 11, 2026  
+**Version:** 2.0.6

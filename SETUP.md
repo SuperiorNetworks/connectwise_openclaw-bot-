@@ -37,7 +37,7 @@ python3 -m venv venv
 source venv/bin/activate  # or: venv\Scripts\activate (Windows)
 
 # Install dependencies
-pip install discord.py requests
+pip install discord.py requests anthropic
 ```
 
 ### 4. Configure
@@ -118,11 +118,12 @@ sudo systemctl status discord-ticket-bot
   "discord_guild_id": "445019596139921408",
   "discord_channel_name": "cw-ticketing",
   "cw_base_url": "https://na.myconnectwise.net/v4_6_release/apis/3.0",
-  "cw_company": "superiornet",
-  "cw_public_key": "3FkwDGYM7Ob33x4v",
-  "cw_private_key": "Ve0RSVdznQW95Own",
-  "cw_client_id": "2306df36-0849-4d92-a518-ba612e892c1d",
+  "cw_company": "your_cw_company_id",
+  "cw_public_key": "your_public_key",
+  "cw_private_key": "your_private_key",
+  "cw_client_id": "your_client_id",
   "cw_member_id": 147,
+  "anthropic_api_key": "sk-ant-...",
   "default_priority_id": 8,
   "default_priority_name": "Medium",
   "company_mapping": {
@@ -274,7 +275,7 @@ Then set env vars before running:
 ```bash
 export CW_PUBLIC_KEY="..."
 export CW_PRIVATE_KEY="..."
-python3 discord_ticket_listener_v2.py
+python3 discord_ticket_bot.py
 ```
 
 ## Support
