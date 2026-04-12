@@ -39,6 +39,7 @@ Change Log:
   2026-04-11 v2.0.6 - Fixed silent conversation handler (subject/description/time stages now respond); fixed fuzzy client match stopword filter; added cancel/stop command (Dwain Henderson Jr)
   2026-04-11 v2.0.7 - Fixed bare ticket number detection (e.g. 'add these labels 31671'); extended file upload to support PDFs and all attachment types (Dwain Henderson Jr)
   2026-04-11 v2.0.8 - Fixed attachment upload on ticket updates: files now uploaded to CW instead of appended as URL text (Dwain Henderson Jr)
+  2026-04-11 v2.0.9 - Added log_time() API method; time range parser (HH:MM - HH:MM); update flow now creates CW time entry and asks for time if not provided (Dwain Henderson Jr)
 """
 
 import re
@@ -534,6 +535,54 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
             print(f"  [file] Upload failed for {image_url}: {e}")
             return {"status": "error", "error": str(e)}
 
+    def log_time(self, ticket_id: int, hours: float, notes: str = "") -> dict:
+        """Create a time entry on a ConnectWise ticket via /time/entries"""
+        auth = base64.b64encode(
+            f"{self.cw_company}+{self.cw_public_key}:{self.cw_private_key}".encode()
+        ).decode()
+        headers = {
+            "Authorization": f"Basic {auth}",
+            "clientId": self.cw_client_id,
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "chargeToId": ticket_id,
+            "chargeToType": "ServiceTicket",
+            "member": {"identifier": self.cw_member_id},
+            "actualHours": round(hours, 2),
+            "billableOption": "Billable",
+            "notes": notes or ""
+        }
+        try:
+            resp = requests.post(
+                f"{self.cw_base_url}/time/entries",
+                headers=headers,
+                json=payload,
+                timeout=10
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return {"status": "success", "time_id": data.get("id"), "hours": hours}
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
+
+    def _parse_time_range(self, text: str):
+        """Extract hours from a time range like '22:00 - 22:45' or '10:00-11:30'.
+        Returns (hours_float, cleaned_text) or (None, original_text)."""
+        pattern = re.compile(r'\b(\d{1,2}):(\d{2})\s*[-\u2013]\s*(\d{1,2}):(\d{2})\b')
+        m = pattern.search(text)
+        if not m:
+            return None, text
+        sh, sm, eh, em = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
+        start_min = sh * 60 + sm
+        end_min = eh * 60 + em
+        if end_min <= start_min:
+            end_min += 24 * 60  # crossed midnight
+        hours = round((end_min - start_min) / 60, 2)
+        cleaned = pattern.sub('', text).strip().lstrip('- ').strip()
+        return hours, cleaned
+
     def update_ticket(self, ticket_id: int, note: str, member_id: str = None) -> dict:
         """Add a note/update to an existing ConnectWise ticket"""
         auth = __import__('base64').b64encode(
@@ -665,17 +714,22 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
         # Multi-line: always format as bullet list (whether or not instruction was given)
         return '\n'.join(f'• {ln}' for ln in lines)
 
-    async def _handle_ticket_update(self, message: discord.Message, ticket_id: int, note: str):
-        """Add a note to an existing ConnectWise ticket"""
+    async def _handle_ticket_update(self, message: discord.Message, ticket_id: int, note: str, hours: float = None):
+        """Add a note to an existing ConnectWise ticket and optionally log time"""
         if not note:
             await message.reply(f"📝 What update should I add to ticket #{ticket_id}?")
-            # Store in conversation state waiting for note text
             self.conversations[message.author.id] = {
                 "mode": "update",
                 "stage": "note",
                 "data": {"ticket_id": ticket_id}
             }
             return
+
+        # Try to extract a time range from the note text (e.g. '22:00 - 22:45')
+        if hours is None:
+            detected_hours, note = self._parse_time_range(note)
+            if detected_hours is not None:
+                hours = detected_hours
 
         # Fetch ticket to confirm it exists and get client name
         ticket_result = self.get_ticket(ticket_id)
@@ -687,13 +741,15 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
         company_name = ticket.get("company", {}).get("name", "Unknown")
         summary = ticket.get("summary", "")
 
-          # Format note: auto-bullet multi-line notes, strip formatting instructions
+        # Format note: auto-bullet multi-line notes, strip formatting instructions
         note = self._format_note(note)
+
         # Post the note
         update_result = self.update_ticket(ticket_id, note)
         if update_result["status"] != "success":
             await message.reply(f"❌ Failed to update ticket: {update_result.get('error')}")
             return
+
         # Upload any Discord attachments (images, PDFs, files) to ConnectWise
         uploaded = []
         if message.attachments:
@@ -701,6 +757,34 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
                 result = self.upload_image_to_ticket(ticket_id, att.url, att.filename)
                 if result["status"] == "success":
                     uploaded.append(att.filename)
+
+        # If no time provided yet, ask for it and save state
+        if hours is None:
+            self.conversations[message.author.id] = {
+                "mode": "update",
+                "stage": "time",
+                "data": {
+                    "ticket_id": ticket_id,
+                    "note": note,
+                    "uploaded": uploaded,
+                    "company_name": company_name,
+                    "summary": summary
+                }
+            }
+            await message.reply("⏱️ Time to log? (or 'skip')", mention_author=False)
+            return
+
+        # Log time entry if hours were provided
+        time_logged = None
+        if hours:
+            time_result = self.log_time(ticket_id, hours, note)
+            if time_result["status"] == "success":
+                time_logged = hours
+                print(f"  ⏱️ Time entry logged: {hours}h on ticket #{ticket_id}")
+            else:
+                print(f"  ⚠️ Time entry failed: {time_result.get('error')}")
+
+        # Build confirmation embed
         embed = discord.Embed(
             title=f"✅ Ticket #{ticket_id} Updated",
             description=summary,
@@ -708,13 +792,15 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
             url=self._generate_deep_link(ticket_id)
         )
         embed.add_field(name="Client", value=company_name, inline=True)
+        if time_logged:
+            embed.add_field(name="Time Logged", value=f"{time_logged} hrs", inline=True)
         embed.add_field(name="Note Added", value=note[:500], inline=False)
         if uploaded:
             embed.add_field(name="Files Uploaded", value="\n".join(uploaded), inline=False)
         embed.add_field(name="Link", value=f"[Open in ConnectWise]({self._generate_deep_link(ticket_id)})", inline=False)
         embed.set_footer(text=f"Updated by {message.author.name}")
         await message.reply(embed=embed, mention_author=False)
-        print(f"✅ Updated ticket #{ticket_id} with note{' + ' + str(len(uploaded)) + ' file(s)' if uploaded else ''}")
+        print(f"✅ Updated ticket #{ticket_id} with note{', ' + str(time_logged) + 'h time entry' if time_logged else ''}{' + ' + str(len(uploaded)) + ' file(s)' if uploaded else ''}")
     
     async def _create_ticket_and_schedule(self, message: discord.Message, parsed: Dict[str, Any]):
         """Create ticket and optionally schedule appointment"""
@@ -1022,6 +1108,49 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
                 ticket_id = conv["data"]["ticket_id"]
                 del self.conversations[user_id]
                 await self._handle_ticket_update(message, ticket_id, content)
+            elif conv.get("mode") == "update" and conv.get("stage") == "time":
+                data = conv["data"]
+                del self.conversations[user_id]
+                hours = None
+                if content.strip().lower() not in ("skip", "s", "no", "none"):
+                    # Try time range first (e.g. 22:00 - 22:45)
+                    hours, _ = self._parse_time_range(content)
+                    if hours is None:
+                        h_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:h(?:ours?|rs?)?)', content, re.IGNORECASE)
+                        m_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:m(?:in(?:utes?)?)?)', content, re.IGNORECASE)
+                        if h_match:
+                            hours = float(h_match.group(1))
+                        elif m_match:
+                            hours = round(float(m_match.group(1)) / 60, 2)
+                        else:
+                            try:
+                                hours = float(content.strip())
+                            except ValueError:
+                                pass
+                # Log time if provided
+                time_logged = None
+                if hours:
+                    time_result = self.log_time(data["ticket_id"], hours, data["note"])
+                    if time_result["status"] == "success":
+                        time_logged = hours
+                        print(f"  ⏱️ Time entry logged: {hours}h on ticket #{data['ticket_id']}")
+                    else:
+                        print(f"  ⚠️ Time entry failed: {time_result.get('error')}")
+                embed = discord.Embed(
+                    title=f"✅ Ticket #{data['ticket_id']} Updated",
+                    description=data.get("summary", ""),
+                    color=discord.Color.blue(),
+                    url=self._generate_deep_link(data["ticket_id"])
+                )
+                embed.add_field(name="Client", value=data.get("company_name", ""), inline=True)
+                if time_logged:
+                    embed.add_field(name="Time Logged", value=f"{time_logged} hrs", inline=True)
+                embed.add_field(name="Note Added", value=data["note"][:500], inline=False)
+                if data.get("uploaded"):
+                    embed.add_field(name="Files Uploaded", value="\n".join(data["uploaded"]), inline=False)
+                embed.add_field(name="Link", value=f"[Open in ConnectWise]({self._generate_deep_link(data['ticket_id'])})", inline=False)
+                embed.set_footer(text=f"Updated by {message.author.name}")
+                await message.reply(embed=embed, mention_author=False)
             else:
                 # Handle conversational create flow
                 stage = conv.get("stage")
