@@ -4,11 +4,21 @@ A conversational Discord bot that acts as an intelligent bridge between Discord 
 
 **Vision:** This project is evolving into a specialized ConnectWise sub-agent. The goal is to build an agent that masters natural language intent matching, provides constructive feedback to users on how to improve their prompts, and can eventually be tasked by a "Master Agent" virtual assistant to handle all ConnectWise-specific operations throughout the day. See the [Roadmap](ROADMAP.md) for details.
 
-**Current Version:** v2.4.0
+**Current Version:** v2.5.0
 
 ---
 
 ## Key Features
+
+### Dual-Mode Behavior
+
+| Where you message Miles | What it does |
+|---|---|
+| **`#cw-ticketing` channel** | ConnectWise only — creates tickets, logs time, updates tickets |
+| **Direct Message to Miles** | Full conversational assistant with persistent memory |
+| **`@Miles` in any other channel** | Full conversational assistant with persistent memory |
+
+### ConnectWise Features (`#cw-ticketing`)
 
 - **Live ConnectWise Client Sync:** The bot pulls your full active company list directly from ConnectWise on startup and auto-refreshes it every 24 hours in the background. No more hardcoding client names in a config file!
 - **One-Shot Ticket Creation:** Type a single message like `"Create a ticket for Positive Electric with subject Server Down, description Main file server offline, schedule for tomorrow at 2pm, 5 hours, high priority"` and the bot extracts all fields and creates the ticket instantly.

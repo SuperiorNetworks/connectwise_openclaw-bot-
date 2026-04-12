@@ -2,6 +2,17 @@
 
 All notable changes to the Discord Conversational Ticket Bot will be documented in this file.
 
+## [2.5.0] - 2026-04-12
+
+### Added
+- **Dual-mode routing** — Miles now has two distinct personalities based on where you talk to it:
+  - **`#cw-ticketing` channel** — ConnectWise only. Creates tickets, logs time, updates tickets. Ignores all non-CW messages.
+  - **DMs and `@Miles` in any other channel** — Full conversational assistant with persistent memory.
+- **Persistent memory** — A `miles_assistant_memory.json` file is maintained in the OpenClaw memory directory (`/root/.openclaw/SNDayton/memory/`). After each assistant conversation, Claude Haiku extracts new facts and updates a running summary. This memory is injected into every future conversation so Miles remembers context across sessions, days, and reboots.
+- **Per-user short-term history** — Each user's last 20 conversation turns are kept in memory during the bot's uptime, giving Miles context within an ongoing conversation.
+- **Memory-aware system prompt** — The assistant mode system prompt includes the persistent memory summary and known facts, making Miles context-aware from the first message of any new session.
+- **`Miles:` commands work in assistant mode** — All existing `Miles:` / `AI:` prefix commands (summarize, translate, format, etc.) continue to work in DMs and other channels.
+
 ## [2.4.0] - 2026-04-12
 
 ### Fixed

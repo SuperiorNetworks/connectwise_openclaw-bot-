@@ -41,6 +41,7 @@ Change Log:
   2026-04-11 v2.0.8 - Fixed attachment upload on ticket updates: files now uploaded to CW instead of appended as URL text (Dwain Henderson Jr)
   2026-04-11 v2.0.9 - Added log_time() API method; time range parser (HH:MM - HH:MM); update flow now creates CW time entry and asks for time if not provided (Dwain Henderson Jr)
   2026-04-12 v2.1.0 - Live ConnectWise company sync: pulls full client list on startup, auto-refreshes every 24 hours as background task, manual refresh via 'Miles: refresh clients' command (Dwain Henderson Jr)
+  2026-04-12 v2.5.0 - Dual-mode: #cw-ticketing is CW-only; DMs and @mentions use full conversational assistant with persistent memory (Claude Haiku) (Dwain Henderson Jr)
 """
 
 import re
@@ -49,6 +50,7 @@ import base64
 import lzma
 import asyncio
 import requests
+from pathlib import Path
 try:
     import anthropic as _anthropic
 except ImportError:
@@ -88,10 +90,19 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
         self.priority_ids = config.get("priority_ids", {})
         self.default_priority_id = config.get("default_priority_id", 8)
         
-        # Conversation state
+        # Conversation state (ConnectWise ticket flows)
         self.conversations = {}
 
-        # Claude AI client (for Miles:/AI: commands)
+        # Assistant mode: per-user short-term message history (DMs / @mentions)
+        # { user_id: [ {"role": "user"|"assistant", "content": str}, ... ] }
+        self.assistant_conversations: Dict[int, list] = {}
+        self._assistant_max_history = 20  # keep last 20 turns per user
+
+        # Persistent memory file — lives in the OpenClaw memory directory
+        self._memory_path = Path("/root/.openclaw/SNDayton/memory/miles_assistant_memory.json")
+        self._memory_cache: Optional[Dict[str, Any]] = None  # loaded lazily
+
+        # Claude AI client (for Miles:/AI: commands and assistant mode)
         self._claude_key = config.get("anthropic_api_key", "")
         self._claude = None
         if _anthropic and self._claude_key:
@@ -1142,6 +1153,163 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
         """Wait until the bot is ready before starting the background refresh loop"""
         await self.bot.wait_until_ready()
 
+    # ============================================================================
+    # PERSISTENT MEMORY — read/write the miles_assistant_memory.json file
+    # ============================================================================
+
+    def _load_memory(self) -> Dict[str, Any]:
+        """Load the persistent memory file, returning a dict. Creates it if missing."""
+        if self._memory_cache is not None:
+            return self._memory_cache
+        if self._memory_path.exists():
+            try:
+                self._memory_cache = json.loads(self._memory_path.read_text(encoding="utf-8"))
+                return self._memory_cache
+            except Exception as e:
+                print(f"[Memory] Load error: {e}")
+        # Default empty structure
+        self._memory_cache = {
+            "version": 1,
+            "updatedAt": None,
+            "owner": "Dwain Henderson Jr — Superior Networks LLC, Dayton OH",
+            "facts": [],
+            "summary": ""
+        }
+        return self._memory_cache
+
+    def _save_memory(self, data: Dict[str, Any]) -> None:
+        """Persist the memory dict to disk."""
+        try:
+            data["updatedAt"] = datetime.utcnow().isoformat() + "Z"
+            self._memory_path.parent.mkdir(parents=True, exist_ok=True)
+            self._memory_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+            self._memory_cache = data
+        except Exception as e:
+            print(f"[Memory] Save error: {e}")
+
+    def _memory_context_block(self) -> str:
+        """Return a compact string representation of persistent memory for the system prompt."""
+        mem = self._load_memory()
+        parts = []
+        if mem.get("summary"):
+            parts.append(f"PERSISTENT MEMORY SUMMARY:\n{mem['summary']}")
+        if mem.get("facts"):
+            facts_text = "\n".join(f"- {f}" for f in mem["facts"][-40:])  # last 40 facts
+            parts.append(f"KNOWN FACTS:\n{facts_text}")
+        return "\n\n".join(parts) if parts else "No persistent memory yet."
+
+    async def _maybe_update_memory(self, user_message: str, assistant_reply: str) -> None:
+        """Ask Claude to extract any new facts from the exchange and update memory."""
+        if not self._claude:
+            return
+        mem = self._load_memory()
+        existing_facts = "\n".join(f"- {f}" for f in mem.get("facts", []))
+        extraction_prompt = (
+            f"You are a memory manager for an AI assistant named Miles.\n"
+            f"Review this conversation exchange and extract any NEW facts worth remembering "
+            f"about the user, their business, clients, schedule, preferences, or ongoing projects.\n"
+            f"Only extract facts that are not already in the existing facts list.\n"
+            f"Return ONLY a JSON object with two keys:\n"
+            f"  \"new_facts\": list of new fact strings (empty list if none)\n"
+            f"  \"updated_summary\": a concise 3-5 sentence summary of everything known about the user\n\n"
+            f"EXISTING FACTS:\n{existing_facts or 'None yet'}\n\n"
+            f"USER SAID: {user_message[:500]}\n"
+            f"MILES REPLIED: {assistant_reply[:500]}"
+        )
+        try:
+            resp = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self._claude.messages.create(
+                    model="claude-haiku-4-5",
+                    max_tokens=600,
+                    messages=[{"role": "user", "content": extraction_prompt}]
+                )
+            )
+            raw = resp.content[0].text.strip()
+            # Strip markdown code fences if present
+            raw = re.sub(r'^```(?:json)?\s*', '', raw, flags=re.MULTILINE)
+            raw = re.sub(r'```\s*$', '', raw, flags=re.MULTILINE).strip()
+            extracted = json.loads(raw)
+            new_facts = extracted.get("new_facts", [])
+            updated_summary = extracted.get("updated_summary", "")
+            if new_facts or updated_summary:
+                mem["facts"] = mem.get("facts", []) + new_facts
+                if updated_summary:
+                    mem["summary"] = updated_summary
+                self._save_memory(mem)
+                if new_facts:
+                    print(f"[Memory] Stored {len(new_facts)} new fact(s)")
+        except Exception as e:
+            print(f"[Memory] Update skipped: {e}")
+
+    # ============================================================================
+    # ASSISTANT MODE — full conversational AI with memory (DMs / @mentions)
+    # ============================================================================
+
+    async def _handle_assistant_message(self, message: discord.Message, content: str) -> None:
+        """
+        Handle a message in assistant mode (DMs or @mentions outside #cw-ticketing).
+        Uses Claude Haiku with persistent memory and per-user short-term history.
+        """
+        if not self._claude:
+            await message.reply(
+                "⚠️ I'm not configured for general assistant mode yet — "
+                "the AI key is missing. I can still handle ConnectWise tasks in #cw-ticketing.",
+                mention_author=False
+            )
+            return
+
+        user_id = message.author.id
+        user_name = message.author.display_name
+
+        # Strip @Miles mention from content if present
+        clean_content = re.sub(r'<@!?\d+>', '', content).strip()
+        if not clean_content:
+            await message.reply("Hey! What can I help you with?", mention_author=False)
+            return
+
+        # Build short-term history for this user
+        history = self.assistant_conversations.get(user_id, [])
+        history.append({"role": "user", "content": clean_content})
+
+        # Build system prompt with persistent memory injected
+        memory_block = self._memory_context_block()
+        system_prompt = (
+            f"You are Miles, a smart personal assistant for {user_name} at Superior Networks LLC "
+            f"(a one-person MSP in Dayton, Ohio run by Dwain Henderson Jr).\n"
+            f"You are helpful, concise, and professional. You remember context across conversations.\n"
+            f"For ConnectWise ticket work, direct the user to the #cw-ticketing channel.\n\n"
+            f"{memory_block}"
+        )
+
+        try:
+            async with message.channel.typing():
+                resp = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: self._claude.messages.create(
+                        model="claude-haiku-4-5",
+                        max_tokens=1000,
+                        system=system_prompt,
+                        messages=history[-self._assistant_max_history:]
+                    )
+                )
+            reply_text = resp.content[0].text.strip()
+        except Exception as e:
+            await message.reply(f"❌ Assistant error: {e}", mention_author=False)
+            return
+
+        # Update short-term history
+        history.append({"role": "assistant", "content": reply_text})
+        # Trim to max history
+        if len(history) > self._assistant_max_history * 2:
+            history = history[-(self._assistant_max_history * 2):]
+        self.assistant_conversations[user_id] = history
+
+        await message.reply(reply_text, mention_author=False)
+
+        # Fire-and-forget memory update (don't block the reply)
+        asyncio.create_task(self._maybe_update_memory(clean_content, reply_text))
+
     @commands.Cog.listener()
     async def on_ready(self):
         """Bot ready — pull company list from ConnectWise on startup, then start 24h refresh loop"""
@@ -1351,7 +1519,11 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        """Main message listener — responds in DMs, cw-ticketing, and any channel where @Miles is mentioned"""
+        """
+        Main message listener — dual-mode routing:
+          - #cw-ticketing channel: ConnectWise only (tickets, time entries, updates)
+          - DMs and any channel where @Miles is mentioned: full assistant with persistent memory
+        """
         if message.author == self.bot.user:
             return
 
@@ -1359,15 +1531,30 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
         is_cw_channel = message.channel.id == self.channel_id
         is_mentioned = self.bot.user in message.mentions
 
-        # Respond in: DMs, the cw-ticketing channel, or any channel where @Miles is mentioned
+        # Ignore messages that don't involve Miles at all
         if not (is_dm or is_cw_channel or is_mentioned):
             return
-        
+
         print(f"\n[{datetime.now().isoformat()}] {message.author}: {message.content[:80]}")
-        
+
         user_id = message.author.id
         content = message.content.strip()
 
+        # ── ASSISTANT MODE: DMs and @mentions outside #cw-ticketing ─────────
+        if (is_dm or is_mentioned) and not is_cw_channel:
+            # Miles: / AI: commands still work in assistant mode
+            miles_match = re.search(r'(?im)^(?:miles|ai)\s*:\s*(.+?)(?:\n|$)', content)
+            if miles_match:
+                instruction = miles_match.group(1).strip()
+                body = content[:miles_match.start()].strip()
+                handled = await self._handle_miles_command(message, instruction, body)
+                if handled:
+                    return
+            # Route everything else to the conversational assistant
+            await self._handle_assistant_message(message, content)
+            return
+
+        # ── CW-TICKETING MODE: ConnectWise only ──────────────────────────────
         # ── Miles:/AI: command prefix detection ──────────────────────────────
         # Matches: 'Miles: <instruction>' or 'AI: <instruction>'
         # Can appear anywhere in the message (inline with a note or standalone)
