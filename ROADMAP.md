@@ -20,8 +20,8 @@ Ideas that gain traction and fit the project scope will be converted into Issues
 
 ### Short-Term (Next Release Cycle)
 
-* **Public Image Hosting for Inline Display**
-  * *Description:* Currently, images uploaded via Discord are attached to the ConnectWise ticket's Documents tab. To display images inline within the Discussion note body, the bot needs to host the image on a public URL (e.g., AWS S3, Imgur, or a dedicated CDN) and embed that URL as markdown in the note text.
+* **Private Self-Hosted Image Hosting for Inline Display**
+  * *Description:* Currently, images uploaded via Discord are attached to the ConnectWise ticket's Documents tab. To display images inline within the Discussion note body, the bot needs to upload the image to a private self-hosted server (via FTP, Drive, or GET) and embed the resulting public URL as a markdown image link directly in the note text.
   * *Status:* Gathering requirements (See Discussion #1)
 
 * **Expanded `Miles:` AI Commands**
