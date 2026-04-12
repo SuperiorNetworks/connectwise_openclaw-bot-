@@ -255,8 +255,8 @@ TAXABLE: No
 
 ## Advanced Features
 
-### Image Uploads
-You can paste images directly into Discord while creating or updating a ticket. The bot will automatically upload them to the ConnectWise ticket as inline images.
+### File & Image Uploads
+You can paste images, PDFs, Word documents, or any other file directly into Discord while creating or updating a ticket. The bot will automatically upload them to the ConnectWise ticket's Documents tab.
 
 ### AI Assistance (Miles)
 You can use the `Miles:` or `AI:` prefix to have the bot format your notes or summarize tickets.
@@ -305,4 +305,4 @@ Otherwise, just start typing and the bot will guide you.
 ---
 
 **Last Updated:** April 11, 2026  
-**Version:** 2.0.6
+**Version:** 2.0.8

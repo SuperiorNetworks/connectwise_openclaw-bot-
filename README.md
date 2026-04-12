@@ -2,7 +2,7 @@
 
 A conversational Discord bot that acts as an intelligent bridge between Discord and ConnectWise Manage. It uses natural language processing (and Claude AI) to parse free-form messages into structured ConnectWise tickets, schedule entries, and ticket notes.
 
-**Current Version:** v2.0.6
+**Current Version:** v2.0.8
 
 ---
 
@@ -10,8 +10,8 @@ A conversational Discord bot that acts as an intelligent bridge between Discord 
 
 - **One-Shot Ticket Creation:** Type a single message like `"Create a ticket for Positive Electric with subject Server Down, description Main file server offline, schedule for tomorrow at 2pm, 5 hours, high priority"` and the bot extracts all fields and creates the ticket instantly.
 - **Conversational Fallback:** If you just type `"Positive Electric"`, the bot will ask you step-by-step for the subject, description, and time to log.
-- **Smart Ticket Updates:** Type `add to ticket 31666 - Rebooted the server` or just `#31666` to append notes directly to the ConnectWise ticket's Discussion tab.
-- **Inline Image Uploads:** Paste an image into Discord while creating or updating a ticket, and the bot automatically uploads it as an inline document in ConnectWise.
+- **Smart Ticket Updates:** Type `add to ticket 31666 - Rebooted the server`, `#31666`, or just `31666` to append notes directly to the ConnectWise ticket's Discussion tab.
+- **File & Image Uploads:** Paste images, PDFs, Word documents, or any other file directly into Discord while creating or updating a ticket, and the bot automatically uploads them to the ConnectWise ticket's Documents tab.
 - **Miles / AI Command System:** Prefix any message with `Miles:` or `AI:` to trigger Claude AI for tasks like summarizing tickets, translating text, or formatting notes.
 - **Natural Language Dates:** Understands "tomorrow at 2pm", "next Friday", "in 3 hours", etc.
 - **Deep Linking:** Generates direct `v2025_1` ConnectWise deep links for every created or updated ticket.
@@ -46,7 +46,7 @@ Bot: ✅ Ticket #31642 Created
 
 ### 2. Add a Note to an Existing Ticket
 
-You can reference a ticket using `#12345`, `ticket 12345`, or `add to ticket 12345`.
+You can reference a ticket using `#12345`, `ticket 12345`, `add to ticket 12345`, or just a bare 5-digit number like `12345`.
 
 **Direct Note:**
 ```text
@@ -64,6 +64,12 @@ You: Server is back online
 Bot: ⏱️ Time to log? (or 'skip')
 You: skip
 Bot: ✅ Note Added to Ticket #31666
+```
+
+**Bare Number Note:**
+```text
+You: add these ups labels 31671
+Bot: 📝 What update should I add to ticket #31671?
 ```
 
 ### 3. Miles / AI Commands

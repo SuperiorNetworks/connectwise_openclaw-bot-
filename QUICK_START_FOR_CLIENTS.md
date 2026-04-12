@@ -53,9 +53,15 @@ Bot: ⏱️ Time to log? (or 'skip')
 You: 30 minutes
 ```
 
-### Upload Images
-If you need to share a screenshot or photo, just paste the image into Discord while creating or updating a ticket. The bot will automatically upload it to the ConnectWise ticket.
+**Bare Number Note:**
+```text
+You: add these ups labels 31671
+Bot: 📝 What update should I add to ticket #31671?
+```
 
+### Upload Files & Images
+
+If you need to share a screenshot, photo, PDF, Word document, or any other file, just paste it into Discord while creating or updating a ticket. The bot will automatically upload it to the ConnectWise ticket's Documents tab.
 ### Cancel a Ticket
 If you start creating a ticket but change your mind, just type `cancel`, `stop`, or `abort` at any point.
 
