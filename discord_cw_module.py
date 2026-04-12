@@ -211,6 +211,39 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
                 best_match = company_name
         return best_match
     
+    def _fuzzy_suggest_clients(self, query: str, top_n: int = 3) -> list:
+        """
+        Score every company in the mapping against the query string and return
+        the top_n closest matches as a list of company name strings.
+        Scoring uses character-level substring overlap and word matching.
+        """
+        STOPWORDS = {'llc', 'inc', 'corp', 'co', 'the', 'and', 'of', 'for', 'ltd', 'services', 'solutions'}
+        query_lower = query.lower()
+        query_words = [w for w in re.split(r'\W+', query_lower) if w and w not in STOPWORDS and len(w) >= 3]
+
+        scores = []
+        for company_name in self.company_mapping.keys():
+            name_lower = company_name.lower()
+            name_words = [w for w in re.split(r'\W+', name_lower) if w and w not in STOPWORDS and len(w) >= 3]
+            score = 0
+
+            # Word-level match: query word appears in company name (substring)
+            for qw in query_words:
+                for nw in name_words:
+                    if qw in nw or nw in qw:
+                        # Longer overlap = higher score
+                        score += len(min(qw, nw, key=len)) * 2
+
+            # Bonus: whole query string is a substring of company name or vice versa
+            if query_lower in name_lower or name_lower in query_lower:
+                score += 10
+
+            if score > 0:
+                scores.append((score, company_name))
+
+        scores.sort(key=lambda x: -x[0])
+        return [name for _, name in scores[:top_n]]
+
     def _extract_subject(self, text: str) -> Optional[str]:
         """Extract subject (usually first meaningful sentence)"""
         # Look for "subject:" keyword
@@ -709,17 +742,8 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
         if not parsed["client_name"]:
             # Extract whatever name-like phrase the user typed so we can echo it back
             raw_name = re.search(r'(?:for|client|company)?\s*([A-Z][\w\s&\'.-]{2,40})', message.content)
-            name_hint = f'"**{raw_name.group(1).strip()}**"' if raw_name else 'that client'
-            cw_url = self.config.get('cw_base_url', 'https://na.myconnectwise.net/v4_6_release/apis/3.0')
-            cw_root = cw_url.split('/v4_6')[0] if '/v4_6' in cw_url else 'https://na.myconnectwise.net'
-            add_company_url = f"{cw_root}/v4_6_release/services/system_io/router/openrecord.rails?locale=en_US&recordType=CompanyFV&recid=0&newWindow=false"
-            await message.reply(
-                f"\u274c I couldn't find {name_hint} in ConnectWise.\n\n"
-                f"Before I can create a ticket, the client needs to exist in ConnectWise first.\n"
-                f"\U0001f449 **Add them here:** [New Company in ConnectWise]({add_company_url})\n\n"
-                f"Once added, type `Miles: refresh clients` and then re-send your message.",
-                mention_author=False
-            )
+            typed_name = raw_name.group(1).strip() if raw_name else message.content.strip()
+            await self._send_client_clarify_prompt(message, typed_name, text)
             return
         
         # If complete, create ticket + schedule
@@ -849,16 +873,7 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
         """Create ticket and optionally schedule appointment"""
         company_id = self.company_mapping.get(parsed["client_name"])
         if not company_id:
-            cw_url = self.config.get('cw_base_url', 'https://na.myconnectwise.net/v4_6_release/apis/3.0')
-            cw_root = cw_url.split('/v4_6')[0] if '/v4_6' in cw_url else 'https://na.myconnectwise.net'
-            add_company_url = f"{cw_root}/v4_6_release/services/system_io/router/openrecord.rails?locale=en_US&recordType=CompanyFV&recid=0&newWindow=false"
-            await message.reply(
-                f"\u274c I couldn't find **{parsed['client_name']}** in ConnectWise.\n\n"
-                f"Before I can create a ticket, the client needs to exist in ConnectWise first.\n"
-                f"\U0001f449 **Add them here:** [New Company in ConnectWise]({add_company_url})\n\n"
-                f"Once added, type `Miles: refresh clients` and then re-send your message.",
-                mention_author=False
-            )
+            await self._send_client_clarify_prompt(message, parsed["client_name"], None, parsed=parsed)
             return
         
         # Determine priority
@@ -926,6 +941,52 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
             for att in message.attachments:
                 self.upload_image_to_ticket(ticket_id, att.url, att.filename)
     
+    async def _send_client_clarify_prompt(
+        self,
+        message: discord.Message,
+        typed_name: str,
+        original_text: Optional[str],
+        parsed: Optional[Dict[str, Any]] = None
+    ):
+        """
+        Present a numbered clarification prompt when the client name can't be confirmed.
+        Shows top 3 fuzzy matches + 'None of these' with a link to add in ConnectWise.
+        Stores conversation state so the user's numbered reply resumes ticket creation.
+        """
+        suggestions = self._fuzzy_suggest_clients(typed_name, top_n=3)
+        cw_url = self.config.get('cw_base_url', 'https://na.myconnectwise.net/v4_6_release/apis/3.0')
+        cw_root = cw_url.split('/v4_6')[0] if '/v4_6' in cw_url else 'https://na.myconnectwise.net'
+        add_company_url = (
+            f"{cw_root}/v4_6_release/services/system_io/router/openrecord.rails"
+            f"?locale=en_US&recordType=CompanyFV&recid=0&newWindow=false"
+        )
+
+        lines = [f"\u2753 I don't recognize **\"{typed_name}\"**. Did you mean one of these?\n"]
+        for i, name in enumerate(suggestions, start=1):
+            lines.append(f"`{i}` {name}")
+        none_idx = len(suggestions) + 1
+        lines.append(
+            f"`{none_idx}` None of these — the client needs to exist in ConnectWise first.\n"
+            f"\U0001f449 [Add them here: New Company in ConnectWise]({add_company_url})"
+        )
+        lines.append("\n*(Reply with a number, or type the correct client name)*")
+
+        await message.reply("\n".join(lines), mention_author=False)
+
+        # Save state so we can resume when the user replies
+        self.conversations[message.author.id] = {
+            "mode": "client_clarify",
+            "stage": "pick",
+            "data": {
+                "typed_name": typed_name,
+                "suggestions": suggestions,
+                "none_idx": none_idx,
+                "original_text": original_text,
+                "parsed": parsed,          # may be None if we came from the no-match path
+                "add_company_url": add_company_url,
+            }
+        }
+
     async def _start_conversational_flow(self, message: discord.Message, parsed: Dict[str, Any]):
         """Fall back to conversational flow if info is incomplete"""
         user_id = message.author.id
@@ -1311,6 +1372,78 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
                 ticket_id = int(t_match.group(1))
                 # Route to update handler with the original time-entry text as the note
                 await self._handle_ticket_update(message, ticket_id, pending_text)
+                return
+
+            # ── client_clarify — user is picking from a numbered suggestion list ──
+            if conv.get("mode") == "client_clarify" and conv.get("stage") == "pick":
+                data = conv["data"]
+                suggestions = data["suggestions"]
+                none_idx = data["none_idx"]
+                reply = content.strip()
+
+                # Determine which company the user chose
+                chosen_name = None
+                num_match = re.fullmatch(r'(\d+)', reply)
+                if num_match:
+                    choice = int(num_match.group(1))
+                    if 1 <= choice <= len(suggestions):
+                        chosen_name = suggestions[choice - 1]
+                    elif choice == none_idx:
+                        # User confirmed the client doesn't exist
+                        del self.conversations[user_id]
+                        await message.reply(
+                            f"Got it. Add **{data['typed_name']}** to ConnectWise first, then type "
+                            f"`Miles: refresh clients` and re-send your message.\n"
+                            f"\U0001f449 [New Company in ConnectWise]({data['add_company_url']})",
+                            mention_author=False
+                        )
+                        return
+                else:
+                    # User typed a name directly — try to match it
+                    chosen_name = self._extract_client_name(reply)
+                    if not chosen_name:
+                        # Still no match — re-prompt with new suggestions
+                        del self.conversations[user_id]
+                        await self._send_client_clarify_prompt(message, reply, data.get("original_text"), parsed=data.get("parsed"))
+                        return
+
+                if not chosen_name:
+                    await message.reply(
+                        f"\u274c I didn't understand that choice. Please reply with a number (1–{none_idx}).",
+                        mention_author=False
+                    )
+                    return
+
+                # We have a confirmed company name — resume ticket creation
+                del self.conversations[user_id]
+                original_text = data.get("original_text")
+                existing_parsed = data.get("parsed")
+
+                if existing_parsed:
+                    # We already have a parsed ticket dict — just swap in the confirmed name
+                    existing_parsed["client_name"] = chosen_name
+                    existing_parsed["complete"] = True
+                    await self._create_ticket_and_schedule(message, existing_parsed)
+                elif original_text:
+                    # Re-parse the original message with the confirmed name substituted
+                    fixed_text = re.sub(
+                        re.escape(data["typed_name"]), chosen_name, original_text, flags=re.IGNORECASE, count=1
+                    )
+                    if chosen_name not in fixed_text:
+                        fixed_text = chosen_name + " " + original_text
+                    await self.handle_ticket_request(message, fixed_text)
+                else:
+                    # Fallback: start conversational flow with the confirmed name
+                    await self._start_conversational_flow(message, {
+                        "client_name": chosen_name,
+                        "subject": None,
+                        "description": None,
+                        "hours": None,
+                        "schedule_date": None,
+                        "schedule_time": None,
+                        "priority": None,
+                        "complete": False
+                    })
                 return
 
             # Handle update note stage

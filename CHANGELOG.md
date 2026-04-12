@@ -2,10 +2,24 @@
 
 All notable changes to the Discord Conversational Ticket Bot will be documented in this file.
 
+## [2.3.0] - 2026-04-12
+
+### Added
+- **Confidence-based client clarification prompt** — When no client is found after all lookup passes, the bot now presents a numbered list of the top 3 closest fuzzy matches from the ConnectWise company list instead of hard-failing. Example:
+  > ❓ I don't recognize "Buddy Manufacturing". Did you mean one of these?
+  > `1` Budde Precision Machining
+  > `2` BOSS Buckeye Office Services LLC
+  > `3` Beavercreek City Schools
+  > `4` None of these — the client needs to exist in ConnectWise first. 👉 Add them here
+  > *(Reply with a number, or type the correct client name)*
+- **Numbered reply handler** — When the user replies with a number, the bot confirms the company and resumes ticket creation without requiring the user to retype their original message. If the user types a name instead of a number, the bot attempts to match it and re-prompts if still unrecognized.
+- **`_fuzzy_suggest_clients()` method** — New scoring engine that ranks all companies by character-level substring overlap and word matching to produce relevant suggestions.
+- **`_send_client_clarify_prompt()` method** — Centralized prompt builder used by both the one-shot parser path and the conversational flow path.
+
 ## [2.2.0] - 2026-04-12
 
 ### Changed
-- **No-client-found response (Option A)** — When all lookup passes fail (exact match → fuzzy local → live CW search → still nothing), the bot no longer hard-fails with a red X. It now replies with a clear, instructional message that echoes the unrecognized name, explains the client must exist in ConnectWise first, provides a direct clickable link to the New Company form in ConnectWise, and tells the user to run `Miles: refresh clients` then re-send their message.
+- **No-client-found response (Option A, initial)** — Replaced hard-fail red X with an instructional message including a direct link to the New Company form in ConnectWise and instructions to run `Miles: refresh clients`. *(Superseded by v2.3.0 which adds numbered suggestions.)*
 
 ## [2.1.0] - 2026-04-12
 
