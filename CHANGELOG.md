@@ -2,6 +2,13 @@
 
 All notable changes to the Discord Conversational Ticket Bot will be documented in this file.
 
+## [2.0.2] - 2026-04-12
+
+### Fixed
+- **`add time entry` without ticket number** — Bot now correctly intercepts messages starting with `add time entry` that have no ticket number. Instead of accidentally creating a new ticket, it asks "Which ticket should I add this time entry to?" and waits for the user to reply with a ticket number (e.g., `#31661`).
+- **`add time entry` prefix stripping** — When `add time entry 22:00 - 22:45` is routed to a ticket, the `add time entry` prefix is stripped from the note text before posting to ConnectWise. If the note is empty after stripping (pure time-entry-only message), a default note `Time entry logged: X hrs` is used.
+- **Cancel in all conversation modes** — Added cancel detection (`cancel`/`stop`/`abort`/`quit`/`nevermind`) at the top of the conversation handler so it works in all modes including the new `time_entry_ticket_prompt` mode.
+
 ## [2.0.1] - 2026-04-11
 
 ### Fixed

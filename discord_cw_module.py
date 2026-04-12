@@ -652,6 +652,24 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
     
     async def handle_ticket_request(self, message: discord.Message, text: str):
         """Try to parse and handle a complete ticket request"""
+
+        # ── 'add time entry HH:MM - HH:MM' without a ticket number ────────────
+        # e.g. "add time entry 22:00 - 22:45" with no ticket number supplied
+        if re.match(r'(?i)^\s*add\s+time\s+entry\b', text):
+            ticket_in_msg = re.search(r'#(\d{4,6})\b|\bticket\s+#?(\d{4,6})\b', text)
+            if not ticket_in_msg:
+                # No ticket number — ask for it and store context
+                self.conversations[message.author.id] = {
+                    'mode': 'time_entry_ticket_prompt',
+                    'stage': 'ticket_id',
+                    'data': {'pending_text': text}
+                }
+                await message.reply(
+                    "\U0001f3ab Which ticket should I add this time entry to? (e.g., `#31661`)"
+                )
+                return
+            # Ticket number found — fall through to normal update_match routing
+
         # Check for update/note ticket command first
         # Matches: update ticket 31666, add to ticket 31666, note on ticket 31666,
         #          add note to ticket 31666, #31666, ticket 31666 - <note>
@@ -716,8 +734,19 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
 
     async def _handle_ticket_update(self, message: discord.Message, ticket_id: int, note: str, hours: float = None):
         """Add a note to an existing ConnectWise ticket and optionally log time"""
-        if not note:
-            await message.reply(f"📝 What update should I add to ticket #{ticket_id}?")
+
+        # Strip 'add time entry' prefix if present (e.g. 'add time entry 22:00 - 22:45')
+        note = re.sub(r'(?i)^\s*add\s+time\s+entry\s*', '', note or '').strip()
+
+        # Try to extract a time range from the note text (e.g. '22:00 - 22:45')
+        if hours is None:
+            detected_hours, note = self._parse_time_range(note)
+            if detected_hours is not None:
+                hours = detected_hours
+
+        # If note is empty after stripping, prompt for one (unless we have hours — then it's OK)
+        if not note and hours is None:
+            await message.reply(f"\U0001f4dd What update should I add to ticket #{ticket_id}?")
             self.conversations[message.author.id] = {
                 "mode": "update",
                 "stage": "note",
@@ -725,11 +754,9 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
             }
             return
 
-        # Try to extract a time range from the note text (e.g. '22:00 - 22:45')
-        if hours is None:
-            detected_hours, note = self._parse_time_range(note)
-            if detected_hours is not None:
-                hours = detected_hours
+        # If note is empty but we have hours, use a default note
+        if not note and hours is not None:
+            note = f"Time entry logged: {hours} hrs"
 
         # Fetch ticket to confirm it exists and get client name
         ticket_result = self.get_ticket(ticket_id)
@@ -1103,6 +1130,27 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
             await self.handle_ticket_request(message, content)
         else:
             conv = self.conversations[user_id]
+
+            # ── Cancel at any point ──────────────────────────────────────────
+            if content.strip().lower() in ("cancel", "stop", "abort", "quit", "nevermind", "never mind"):
+                del self.conversations[user_id]
+                await message.reply("\u274c Operation cancelled.", mention_author=False)
+                return
+
+            # ── 'add time entry' — waiting for ticket number ─────────────────
+            if conv.get("mode") == "time_entry_ticket_prompt" and conv.get("stage") == "ticket_id":
+                pending_text = conv["data"]["pending_text"]
+                del self.conversations[user_id]
+                # Extract ticket number from the reply
+                t_match = re.search(r'#?(\d{4,6})\b', content)
+                if not t_match:
+                    await message.reply("\u274c Couldn't find a ticket number. Please include the ticket number (e.g., `#31661`)")
+                    return
+                ticket_id = int(t_match.group(1))
+                # Route to update handler with the original time-entry text as the note
+                await self._handle_ticket_update(message, ticket_id, pending_text)
+                return
+
             # Handle update note stage
             if conv.get("mode") == "update" and conv.get("stage") == "note":
                 ticket_id = conv["data"]["ticket_id"]
