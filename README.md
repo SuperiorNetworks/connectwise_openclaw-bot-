@@ -2,6 +2,8 @@
 
 A conversational Discord bot that acts as an intelligent bridge between Discord and ConnectWise Manage. It uses natural language processing (and Claude AI) to parse free-form messages into structured ConnectWise tickets, schedule entries, and ticket notes.
 
+**Vision:** This project is evolving into a specialized ConnectWise sub-agent. The goal is to build an agent that masters natural language intent matching, provides constructive feedback to users on how to improve their prompts, and can eventually be tasked by a "Master Agent" virtual assistant to handle all ConnectWise-specific operations throughout the day. See the [Roadmap](ROADMAP.md) for details.
+
 **Current Version:** v2.1.0
 
 ---

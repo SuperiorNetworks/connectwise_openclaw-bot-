@@ -1,6 +1,16 @@
 # ConnectWise OpenClaw Bot Roadmap
 
-This document outlines the planned features and enhancements for the ConnectWise Discord Bot. 
+This document outlines the long-term product vision, planned features, and enhancements for the ConnectWise Discord Bot.
+
+## 🌟 Product Vision: The Specialized ConnectWise Sub-Agent
+
+The ultimate goal of this project is to evolve the bot from a simple parser into a **specialized ConnectWise agent**. 
+
+In the future, this bot will act as a dedicated sub-agent that a "Master Agent" (a general-purpose virtual assistant) can task with ConnectWise-specific operations. The master agent will handle the user's entire day, and when a task involves ConnectWise, it will seamlessly hand off the intent to this specialized agent.
+
+To achieve this, the bot must master **natural language intent matching** — understanding exactly what the user (or master agent) wants to do, mapping it to its own capabilities, and providing constructive feedback when requests are ambiguous.
+
+---
 
 ## 💡 Feature Requests & Ideas
 
@@ -29,6 +39,10 @@ Ideas that gain traction and fit the project scope will be converted into Issues
   * *Status:* Planned
 
 ### Medium-Term
+
+* **Natural Language Improvement & Feedback Loop**
+  * *Description:* Improve the bot's ability to match free-form natural language requests with its specific capabilities. If a request is confusing or ambiguous, the bot will provide options to clarify the intent (e.g., "Did you mean to create a ticket, or add a note?"). Once the action is completed, the bot will provide feedback to the user on how to phrase the prompt better next time (e.g., "Next time, you can just say 'add to ticket 12345'"). Users will have a toggle switch to turn this feedback on or off.
+  * *Status:* Planned
 
 * **Ticket Status Updates**
   * *Description:* Allow users to change the status of a ticket directly from Discord (e.g., `update ticket 31666 status to In Progress`).
