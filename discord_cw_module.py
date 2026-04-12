@@ -36,6 +36,7 @@ Change Log:
   2026-04-11 v2.0.3 - Auto-bullet multi-line notes; strip formatting instructions like 'list in bullet style' (Dwain Henderson Jr)
   2026-04-11 v2.0.4 - Added Miles:/AI: command prefix system with Claude AI routing (Dwain Henderson Jr)
   2026-04-11 v2.0.5 - Fixed conversational fallback: bare client name no longer treated as subject (Dwain Henderson Jr)
+  2026-04-11 v2.0.6 - Fixed silent conversation handler (subject/description/time stages now respond); fixed fuzzy client match stopword filter; added cancel/stop command (Dwain Henderson Jr)
 """
 
 import re
@@ -186,14 +187,22 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
             if re.search(rf'\b{re.escape(company_name)}\b', text, re.IGNORECASE):
                 return company_name
         
-        # Fuzzy match if no exact match
-        words = text.split()
+        # Fuzzy match if no exact match — require at least 2 meaningful words to match,
+        # or the single word must be at least 5 chars (avoids 'LLC', 'Inc', etc. triggering a match)
+        STOPWORDS = {'llc', 'inc', 'corp', 'co', 'the', 'and', 'of', 'for', 'ltd'}
+        words = [w.lower() for w in text.split()]
+        best_match = None
+        best_score = 0
         for company_name in self.company_mapping.keys():
-            company_words = company_name.lower().split()
-            if any(word.lower() in [w.lower() for w in words] for word in company_words):
-                return company_name
-        
-        return None
+            company_words = [w.lower() for w in company_name.split() if w.lower() not in STOPWORDS]
+            if not company_words:
+                continue
+            matched = [w for w in company_words if w in words and len(w) >= 4]
+            score = len(matched)
+            if score > best_score and (score >= 2 or (score == 1 and len(matched[0]) >= 6)):
+                best_score = score
+                best_match = company_name
+        return best_match
     
     def _extract_subject(self, text: str) -> Optional[str]:
         """Extract subject (usually first meaningful sentence)"""
@@ -991,8 +1000,54 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
                 await self._handle_ticket_update(message, ticket_id, content)
             else:
                 # Handle conversational create flow
-                print(f"In active conversation (continuing flow)")
+                stage = conv.get("stage")
+                data = conv["data"]
 
+                # ── Cancel at any point ──────────────────────────────────────
+                if content.strip().lower() in ("cancel", "stop", "abort", "quit", "nevermind", "never mind"):
+                    del self.conversations[user_id]
+                    await message.reply("❌ Ticket creation cancelled.", mention_author=False)
+                    return
+
+                if stage == "subject":
+                    data["subject"] = content.strip()
+                    conv["stage"] = "description"
+                    await message.reply("📝 Description/Details?", mention_author=False)
+
+                elif stage == "description":
+                    data["description"] = content.strip() if content.strip().lower() != "skip" else ""
+                    conv["stage"] = "time"
+                    await message.reply("⏱️ Time to log? (or 'skip')", mention_author=False)
+
+                elif stage == "time":
+                    hours = None
+                    if content.strip().lower() != "skip":
+                        hours_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:h(?:ours?|rs?)?)', content, re.IGNORECASE)
+                        mins_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:m(?:in(?:utes?)?)?)', content, re.IGNORECASE)
+                        if hours_match:
+                            hours = float(hours_match.group(1))
+                        elif mins_match:
+                            hours = round(float(mins_match.group(1)) / 60, 2)
+                        else:
+                            try:
+                                hours = float(content.strip())
+                            except ValueError:
+                                pass
+                    data["hours"] = hours
+                    del self.conversations[user_id]
+                    # Build a parsed dict and create the ticket
+                    parsed = {
+                        "client_name": data["company_name"],
+                        "subject": data["subject"],
+                        "description": data.get("description", ""),
+                        "hours": hours,
+                        "schedule_date": data.get("schedule_date"),
+                        "schedule_time": data.get("schedule_time"),
+                        "priority": data.get("priority"),
+                        "note_body": None,
+                        "complete": True
+                    }
+                    await self._create_ticket_and_schedule(message, parsed)
 
 def setup(bot: commands.Bot, config: Dict[str, Any]):
     """Load cog into bot"""
