@@ -2,6 +2,13 @@
 
 All notable changes to the Discord Conversational Ticket Bot will be documented in this file.
 
+## [2.3.1] - 2026-04-12
+
+### Fixed
+- **`typed_name` extraction** — The clarification prompt was echoing the entire message (e.g., `"Make a new ticket for Buddy Manufacturing"`) instead of just the company name. Lead-in phrases like `"Make a new ticket for"` are now stripped before the name is extracted and displayed.
+- **Fuzzy scorer misses near-typos** — The scorer previously required exact substring containment, so `"buddy"` did not match `"budde"`. Added Levenshtein edit-distance scoring: words within 1 edit per 4 characters now score positively. `"Buddy Manufacturing"` now correctly surfaces `"Budde Precision Machining"` as the top suggestion.
+- **Added `_edit_distance()` static method** — Pure-Python Levenshtein implementation, no external dependencies.
+
 ## [2.3.0] - 2026-04-12
 
 ### Added

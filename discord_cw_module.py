@@ -211,11 +211,26 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
                 best_match = company_name
         return best_match
     
+    @staticmethod
+    def _edit_distance(a: str, b: str) -> int:
+        """Levenshtein edit distance between two strings."""
+        if len(a) < len(b):
+            a, b = b, a
+        if not b:
+            return len(a)
+        prev = list(range(len(b) + 1))
+        for i, ca in enumerate(a):
+            curr = [i + 1]
+            for j, cb in enumerate(b):
+                curr.append(min(prev[j + 1] + 1, curr[j] + 1, prev[j] + (ca != cb)))
+            prev = curr
+        return prev[-1]
+
     def _fuzzy_suggest_clients(self, query: str, top_n: int = 3) -> list:
         """
         Score every company in the mapping against the query string and return
         the top_n closest matches as a list of company name strings.
-        Scoring uses character-level substring overlap and word matching.
+        Uses substring overlap AND edit-distance so near-typos like 'buddy' vs 'budde' score.
         """
         STOPWORDS = {'llc', 'inc', 'corp', 'co', 'the', 'and', 'of', 'for', 'ltd', 'services', 'solutions'}
         query_lower = query.lower()
@@ -227,12 +242,18 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
             name_words = [w for w in re.split(r'\W+', name_lower) if w and w not in STOPWORDS and len(w) >= 3]
             score = 0
 
-            # Word-level match: query word appears in company name (substring)
             for qw in query_words:
                 for nw in name_words:
+                    # Exact substring containment
                     if qw in nw or nw in qw:
-                        # Longer overlap = higher score
                         score += len(min(qw, nw, key=len)) * 2
+                    else:
+                        # Edit-distance similarity: reward close matches
+                        max_len = max(len(qw), len(nw))
+                        dist = self._edit_distance(qw, nw)
+                        # Allow 1 edit per 4 chars (e.g. 'buddy'/'budde' = 1 edit in 5 chars → scores)
+                        if dist <= max(1, max_len // 4):
+                            score += (max_len - dist) * 1  # softer weight than exact match
 
             # Bonus: whole query string is a substring of company name or vice versa
             if query_lower in name_lower or name_lower in query_lower:
@@ -740,9 +761,17 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
         parsed = self.parse_full_ticket_request(text)
         
         if not parsed["client_name"]:
-            # Extract whatever name-like phrase the user typed so we can echo it back
-            raw_name = re.search(r'(?:for|client|company)?\s*([A-Z][\w\s&\'.-]{2,40})', message.content)
-            typed_name = raw_name.group(1).strip() if raw_name else message.content.strip()
+            # Strip lead-in phrases to isolate just the company name the user typed
+            clean = re.sub(
+                r'(?i)^\s*(?:make|create|open|log|submit|add|new)?\s*(?:a\s+|an\s+)?'
+                r'(?:new\s+)?(?:ticket|issue|case|request)\s+(?:for|to|with)?\s*',
+                '', message.content
+            ).strip()
+            # Also strip trailing description after a period or comma
+            clean = re.split(r'[.,]\s+(?:they|the|it|this|he|she|please|description)', clean, flags=re.IGNORECASE)[0].strip()
+            # Grab the first capitalised name-like phrase from the cleaned text
+            raw_name = re.match(r'([A-Z][\w\s&\'.-]{1,40}?)(?:\s*[.,]|\s+(?:they|the|it|has|have|is|are|problem|issue|camera|computer|server)|$)', clean)
+            typed_name = raw_name.group(1).strip() if raw_name else clean[:40].strip()
             await self._send_client_clarify_prompt(message, typed_name, text)
             return
         
