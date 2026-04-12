@@ -2,6 +2,18 @@
 
 All notable changes to the Discord Conversational Ticket Bot will be documented in this file.
 
+## [2.4.0] - 2026-04-12
+
+### Fixed
+- **Duplicate bot process** — An orphan instance (PID 2651) started at VPS boot was competing with the systemd-managed instance for Discord gateway messages, causing unpredictable silence. The orphan was killed and the service restarted to ensure a single clean instance.
+
+### Changed
+- **Removed single-channel restriction** — The bot previously only responded in the `#cw-ticketing` channel (hard-coded channel ID filter). It now responds in:
+  - **Direct Messages (DMs)** to the bot
+  - **`#cw-ticketing`** channel (unchanged)
+  - **Any channel where `@Miles` is mentioned**
+- Messages in other channels without an `@Miles` mention are still ignored to prevent noise.
+
 ## [2.3.1] - 2026-04-12
 
 ### Fixed

@@ -1351,8 +1351,16 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        """Main message listener"""
-        if message.author == self.bot.user or message.channel.id != self.channel_id:
+        """Main message listener — responds in DMs, cw-ticketing, and any channel where @Miles is mentioned"""
+        if message.author == self.bot.user:
+            return
+
+        is_dm = isinstance(message.channel, discord.DMChannel)
+        is_cw_channel = message.channel.id == self.channel_id
+        is_mentioned = self.bot.user in message.mentions
+
+        # Respond in: DMs, the cw-ticketing channel, or any channel where @Miles is mentioned
+        if not (is_dm or is_cw_channel or is_mentioned):
             return
         
         print(f"\n[{datetime.now().isoformat()}] {message.author}: {message.content[:80]}")
