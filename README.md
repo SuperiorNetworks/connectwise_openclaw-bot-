@@ -2,7 +2,7 @@
 
 A conversational Discord bot that acts as an intelligent bridge between Discord and ConnectWise Manage. It uses natural language processing (and Claude AI) to parse free-form messages into structured ConnectWise tickets, schedule entries, and ticket notes.
 
-**Current Version:** v2.0.4
+**Current Version:** v2.0.6
 
 ---
 
@@ -23,6 +23,8 @@ A conversational Discord bot that acts as an intelligent bridge between Discord 
 ### 1. Create a New Ticket
 
 You can provide all information at once, or let the bot guide you.
+
+*(Note: You can type `cancel`, `stop`, or `abort` at any point during a conversational flow to cleanly exit without creating a ticket.)*
 
 **Conversational Flow:**
 ```text
