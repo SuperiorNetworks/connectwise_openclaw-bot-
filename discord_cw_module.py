@@ -38,6 +38,7 @@ Change Log:
   2026-04-11 v2.0.5 - Fixed conversational fallback: bare client name no longer treated as subject (Dwain Henderson Jr)
   2026-04-11 v2.0.6 - Fixed silent conversation handler (subject/description/time stages now respond); fixed fuzzy client match stopword filter; added cancel/stop command (Dwain Henderson Jr)
   2026-04-11 v2.0.7 - Fixed bare ticket number detection (e.g. 'add these labels 31671'); extended file upload to support PDFs and all attachment types (Dwain Henderson Jr)
+  2026-04-11 v2.0.8 - Fixed attachment upload on ticket updates: files now uploaded to CW instead of appended as URL text (Dwain Henderson Jr)
 """
 
 import re
@@ -686,18 +687,20 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
         company_name = ticket.get("company", {}).get("name", "Unknown")
         summary = ticket.get("summary", "")
 
-        # Format note: auto-bullet multi-line notes, strip formatting instructions
+          # Format note: auto-bullet multi-line notes, strip formatting instructions
         note = self._format_note(note)
-        # Append Discord image/file attachments to the note
-        if message.attachments:
-            att_lines = [f"[Attachment from {message.author.name}]: {att.url}" for att in message.attachments]
-            note = (note + "\n\n" + "\n".join(att_lines)).strip()
         # Post the note
         update_result = self.update_ticket(ticket_id, note)
         if update_result["status"] != "success":
             await message.reply(f"❌ Failed to update ticket: {update_result.get('error')}")
             return
-
+        # Upload any Discord attachments (images, PDFs, files) to ConnectWise
+        uploaded = []
+        if message.attachments:
+            for att in message.attachments:
+                result = self.upload_image_to_ticket(ticket_id, att.url, att.filename)
+                if result["status"] == "success":
+                    uploaded.append(att.filename)
         embed = discord.Embed(
             title=f"✅ Ticket #{ticket_id} Updated",
             description=summary,
@@ -706,11 +709,12 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
         )
         embed.add_field(name="Client", value=company_name, inline=True)
         embed.add_field(name="Note Added", value=note[:500], inline=False)
+        if uploaded:
+            embed.add_field(name="Files Uploaded", value="\n".join(uploaded), inline=False)
         embed.add_field(name="Link", value=f"[Open in ConnectWise]({self._generate_deep_link(ticket_id)})", inline=False)
         embed.set_footer(text=f"Updated by {message.author.name}")
-
         await message.reply(embed=embed, mention_author=False)
-        print(f"✅ Updated ticket #{ticket_id} with note")
+        print(f"✅ Updated ticket #{ticket_id} with note{' + ' + str(len(uploaded)) + ' file(s)' if uploaded else ''}")
     
     async def _create_ticket_and_schedule(self, message: discord.Message, parsed: Dict[str, Any]):
         """Create ticket and optionally schedule appointment"""
