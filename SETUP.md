@@ -58,7 +58,8 @@ Fill in:
 - `cw_private_key`: Your private key
 - `cw_client_id`: Your UUID client ID
 - `cw_member_id`: Your numeric member ID (for time entries)
-- `company_mapping`: Map of client names to company IDs
+
+*(Note: The `company_mapping` dictionary in the config file is no longer required. The bot now automatically pulls your full active client list from ConnectWise on startup and refreshes it every 24 hours.)*
 
 ### 5. Get Discord Channel & Guild IDs
 

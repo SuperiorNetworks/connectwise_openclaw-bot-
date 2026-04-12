@@ -40,12 +40,14 @@ Change Log:
   2026-04-11 v2.0.7 - Fixed bare ticket number detection (e.g. 'add these labels 31671'); extended file upload to support PDFs and all attachment types (Dwain Henderson Jr)
   2026-04-11 v2.0.8 - Fixed attachment upload on ticket updates: files now uploaded to CW instead of appended as URL text (Dwain Henderson Jr)
   2026-04-11 v2.0.9 - Added log_time() API method; time range parser (HH:MM - HH:MM); update flow now creates CW time entry and asks for time if not provided (Dwain Henderson Jr)
+  2026-04-12 v2.1.0 - Live ConnectWise company sync: pulls full client list on startup, auto-refreshes every 24 hours as background task, manual refresh via 'Miles: refresh clients' command (Dwain Henderson Jr)
 """
 
 import re
 import json
 import base64
 import lzma
+import asyncio
 import requests
 try:
     import anthropic as _anthropic
@@ -60,7 +62,7 @@ except ImportError:
     parse_date = None
     relativedelta = None
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 
 class DiscordTicketBotV2Enhanced(commands.Cog):
@@ -80,7 +82,9 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
         self.cw_client_id = config.get("cw_client_id")
         self.cw_member_id = config.get("cw_member_id")
         
+        # Company mapping: seeded from config, then overwritten by live CW sync on startup
         self.company_mapping = config.get("company_mapping", {})
+        self._company_sync_last_run: Optional[datetime] = None
         self.priority_ids = config.get("priority_ids", {})
         self.default_priority_id = config.get("default_priority_id", 8)
         
@@ -927,10 +931,116 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
         else:
             await message.reply("⏱️ Time to log? (or 'skip')")
     
+    # ============================================================================
+    # LIVE COMPANY SYNC
+    # ============================================================================
+
+    def _fetch_cw_companies(self) -> Dict[str, int]:
+        """
+        Pull the full active company list from ConnectWise Manage.
+        Returns a dict of {company_name: company_id} for all active companies.
+        Fetches in pages of 1000 until all records are retrieved.
+        """
+        auth = base64.b64encode(
+            f"{self.cw_company}+{self.cw_public_key}:{self.cw_private_key}".encode()
+        ).decode()
+        headers = {
+            "Authorization": f"Basic {auth}",
+            "clientId": self.cw_client_id,
+            "Accept": "application/json"
+        }
+        mapping = {}
+        page = 1
+        page_size = 1000
+        while True:
+            try:
+                resp = requests.get(
+                    f"{self.cw_base_url}/company/companies",
+                    headers=headers,
+                    params={
+                        "conditions": "status/name='Active'",
+                        "fields": "id,name",
+                        "pageSize": page_size,
+                        "page": page
+                    },
+                    timeout=15
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                if not data:
+                    break
+                for company in data:
+                    name = company.get("name", "").strip()
+                    cid = company.get("id")
+                    if name and cid:
+                        mapping[name] = cid
+                if len(data) < page_size:
+                    break
+                page += 1
+            except Exception as e:
+                print(f"[CompanySync] Page {page} fetch error: {e}")
+                break
+        return mapping
+
+    async def _sync_companies(self, notify_channel_id: Optional[int] = None, notify_message=None) -> int:
+        """
+        Refresh self.company_mapping from ConnectWise.
+        Returns the number of companies loaded.
+        Optionally posts a Discord reply to notify_message, or posts to notify_channel_id.
+        """
+        print("[CompanySync] Fetching company list from ConnectWise...")
+        try:
+            mapping = await asyncio.get_event_loop().run_in_executor(
+                None, self._fetch_cw_companies
+            )
+            if mapping:
+                self.company_mapping = mapping
+                self._company_sync_last_run = datetime.utcnow()
+                count = len(mapping)
+                print(f"[CompanySync] ✅ Loaded {count} companies from ConnectWise")
+                if notify_message:
+                    await notify_message.reply(
+                        f"✅ Client list refreshed from ConnectWise — **{count} companies** loaded.",
+                        mention_author=False
+                    )
+                return count
+            else:
+                print("[CompanySync] ⚠️ No companies returned — keeping existing list")
+                if notify_message:
+                    await notify_message.reply(
+                        "⚠️ ConnectWise returned no companies. Keeping existing client list.",
+                        mention_author=False
+                    )
+                return 0
+        except Exception as e:
+            print(f"[CompanySync] ❌ Sync failed: {e}")
+            if notify_message:
+                await notify_message.reply(
+                    f"❌ Client list refresh failed: {e}",
+                    mention_author=False
+                )
+            return 0
+
+    @tasks.loop(hours=24)
+    async def _company_refresh_task(self):
+        """Background task: refresh company list from ConnectWise every 24 hours"""
+        await self._sync_companies()
+
+    @_company_refresh_task.before_loop
+    async def _before_company_refresh(self):
+        """Wait until the bot is ready before starting the background refresh loop"""
+        await self.bot.wait_until_ready()
+
     @commands.Cog.listener()
     async def on_ready(self):
-        """Bot ready"""
+        """Bot ready — pull company list from ConnectWise on startup, then start 24h refresh loop"""
         print(f"✅ Enhanced Bot v2 logged in as {self.bot.user}")
+        count = await self._sync_companies()
+        if count:
+            print(f"[CompanySync] Startup sync complete: {count} companies ready")
+        if not self._company_refresh_task.is_running():
+            self._company_refresh_task.start()
+            print("[CompanySync] 24-hour background refresh task started")
     
     # ============================================================================
     # MILES: / AI: COMMAND SYSTEM
@@ -955,6 +1065,10 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
 
         # ── help / commands ──────────────────────────────────────────────────
         if re.search(r'^(help|commands|what can you do)$', instr):
+            last_sync = (
+                self._company_sync_last_run.strftime("%Y-%m-%d %H:%M UTC")
+                if self._company_sync_last_run else "not yet synced"
+            )
             help_text = (
                 "**Miles Command Reference** (use `Miles:` or `AI:` prefix)\n"
                 "```\n"
@@ -964,12 +1078,39 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
                 "Miles: list in bullet style\n"
                 "Miles: numbered list\n"
                 "Miles: send to AI <question or text>\n"
+                "Miles: refresh clients\n"
+                "Miles: client count\n"
                 "Miles: help\n"
                 "```\n"
                 "You can also combine with ticket updates:\n"
-                "`add to ticket 31666 - <note>\nMiles: list in bullet style`"
+                "`add to ticket 31666 - <note>\nMiles: list in bullet style`\n"
+                f"\n\U0001f504 Client list last synced: **{last_sync}** (auto-refreshes every 24 hours)"
             )
             await message.reply(help_text, mention_author=False)
+            return True
+
+        # ── refresh clients ──────────────────────────────────────────────────
+        if re.search(r'refresh\s+clients?|reload\s+clients?|sync\s+clients?|update\s+clients?', instr):
+            await message.reply(
+                "🔄 Refreshing client list from ConnectWise... (this may take a few seconds)",
+                mention_author=False
+            )
+            await self._sync_companies(notify_message=message)
+            return True
+
+        # ── client count ─────────────────────────────────────────────────────
+        if re.search(r'client\s+count|how\s+many\s+clients?|list\s+clients?', instr):
+            count = len(self.company_mapping)
+            last_sync = (
+                self._company_sync_last_run.strftime("%Y-%m-%d %H:%M UTC")
+                if self._company_sync_last_run else "not yet synced"
+            )
+            await message.reply(
+                f"🏢 **{count} active clients** loaded from ConnectWise.\n"
+                f"🕒 Last synced: {last_sync}\n"
+                f"🔄 Auto-refreshes every 24 hours. Use `Miles: refresh clients` to force a refresh.",
+                mention_author=False
+            )
             return True
 
         # ── summarize ticket N ───────────────────────────────────────────────

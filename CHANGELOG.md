@@ -2,6 +2,13 @@
 
 All notable changes to the Discord Conversational Ticket Bot will be documented in this file.
 
+## [2.1.0] - 2026-04-12
+
+### Added
+- **Live ConnectWise Client Sync** — The bot now pulls the full list of active companies directly from ConnectWise on startup, eliminating the need to hardcode client names in the config file.
+- **Background Auto-Refresh** — The client list automatically refreshes every 24 hours in the background without requiring a bot restart.
+- **Manual Refresh Commands** — Added `Miles: refresh clients` to force an immediate sync, and `Miles: client count` to check how many clients are loaded and when the last sync occurred.
+
 ## [2.0.2] - 2026-04-12
 
 ### Fixed

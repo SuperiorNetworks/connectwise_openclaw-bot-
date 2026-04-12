@@ -2,12 +2,13 @@
 
 A conversational Discord bot that acts as an intelligent bridge between Discord and ConnectWise Manage. It uses natural language processing (and Claude AI) to parse free-form messages into structured ConnectWise tickets, schedule entries, and ticket notes.
 
-**Current Version:** v2.0.8
+**Current Version:** v2.1.0
 
 ---
 
 ## Key Features
 
+- **Live ConnectWise Client Sync:** The bot pulls your full active company list directly from ConnectWise on startup and auto-refreshes it every 24 hours in the background. No more hardcoding client names in a config file!
 - **One-Shot Ticket Creation:** Type a single message like `"Create a ticket for Positive Electric with subject Server Down, description Main file server offline, schedule for tomorrow at 2pm, 5 hours, high priority"` and the bot extracts all fields and creates the ticket instantly.
 - **Conversational Fallback:** If you just type `"Positive Electric"`, the bot will ask you step-by-step for the subject, description, and time to log.
 - **Smart Ticket Updates:** Type `add to ticket 31666 - Rebooted the server`, `#31666`, or just `31666` to append notes directly to the ConnectWise ticket's Discussion tab.
@@ -79,6 +80,8 @@ Prefix any message with `Miles:` or `AI:` to trigger the AI command system.
 | Command | Description |
 |---|---|
 | `Miles: help` | Posts the command reference list |
+| `Miles: refresh clients` | Forces an immediate live sync of the company list from ConnectWise |
+| `Miles: client count` | Shows how many active clients are loaded and when the last sync occurred |
 | `Miles: summarize ticket 31666` | Fetches the ticket and posts a Claude-written 2-3 sentence summary |
 | `Miles: translate to Spanish` | Translates the text above the command to Spanish |
 | `Miles: add a priority note at the top` | Prepends a `⚠️ PRIORITY` header to the text above |
