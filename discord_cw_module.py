@@ -37,6 +37,7 @@ Change Log:
   2026-04-11 v2.0.4 - Added Miles:/AI: command prefix system with Claude AI routing (Dwain Henderson Jr)
   2026-04-11 v2.0.5 - Fixed conversational fallback: bare client name no longer treated as subject (Dwain Henderson Jr)
   2026-04-11 v2.0.6 - Fixed silent conversation handler (subject/description/time stages now respond); fixed fuzzy client match stopword filter; added cancel/stop command (Dwain Henderson Jr)
+  2026-04-11 v2.0.7 - Fixed bare ticket number detection (e.g. 'add these labels 31671'); extended file upload to support PDFs and all attachment types (Dwain Henderson Jr)
 """
 
 import re
@@ -476,8 +477,8 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
     
 
     def upload_image_to_ticket(self, ticket_id: int, image_url: str, filename: str = None) -> dict:
-        """Download a Discord image and upload it to ConnectWise as an inline ticket document.
-        Replicates the behavior of pasting a screenshot into the CW discussion editor."""
+        """Download a Discord attachment (image, PDF, or any file) and upload it to ConnectWise
+        as a ticket document. Works for images, PDFs, and all other file types."""
         import requests as _req, io as _io, os as _os
         auth = __import__('base64').b64encode(
             f"{self.cw_company}+{self.cw_public_key}:{self.cw_private_key}".encode()
@@ -490,9 +491,25 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
             img_resp = _req.get(image_url, timeout=30)
             img_resp.raise_for_status()
             img_data = img_resp.content
-            content_type = img_resp.headers.get('Content-Type', 'image/png')
+            content_type = img_resp.headers.get('Content-Type', 'application/octet-stream')
             if not filename:
-                filename = _os.path.basename(image_url.split('?')[0]) or 'attachment.png'
+                filename = _os.path.basename(image_url.split('?')[0]) or 'attachment'
+            # Infer content type from extension if server didn't return a useful one
+            ext = _os.path.splitext(filename)[1].lower()
+            ext_map = {
+                '.pdf': 'application/pdf',
+                '.png': 'image/png',
+                '.jpg': 'image/jpeg',
+                '.jpeg': 'image/jpeg',
+                '.gif': 'image/gif',
+                '.webp': 'image/webp',
+                '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                '.txt': 'text/plain',
+                '.zip': 'application/zip',
+            }
+            if ext in ext_map:
+                content_type = ext_map[ext]
             files = {'file': (filename, _io.BytesIO(img_data), content_type)}
             data = {
                 'recordType': 'Ticket',
@@ -510,10 +527,10 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
             upload_resp.raise_for_status()
             doc = upload_resp.json()
             doc_id = doc.get('id')
-            print(f"  [image] Uploaded {filename} -> CW document #{doc_id} on ticket #{ticket_id}")
+            print(f"  [file] Uploaded {filename} -> CW document #{doc_id} on ticket #{ticket_id}")
             return {"status": "success", "doc_id": doc_id, "filename": filename}
         except Exception as e:
-            print(f"  [image] Upload failed for {image_url}: {e}")
+            print(f"  [file] Upload failed for {image_url}: {e}")
             return {"status": "error", "error": str(e)}
 
     def update_ticket(self, ticket_id: int, note: str, member_id: str = None) -> dict:
@@ -597,6 +614,9 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
             update_match = re.search(r'(?i)\bticket\s+#?(\d{4,6})\b', text)
         if not update_match:
             update_match = re.search(r'#(\d{4,6})\b', text)
+        # Final fallback: bare standalone 4-6 digit number anywhere in the message
+        if not update_match:
+            update_match = re.search(r'(?<![\w.])([3-9]\d{4})(?![\w.])', text)
         if update_match:
             ticket_id = int(update_match.group(1))
             # Strip the ticket reference prefix to get the note text
