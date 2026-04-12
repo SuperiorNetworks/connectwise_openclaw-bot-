@@ -2,6 +2,11 @@
 
 All notable changes to the Discord Conversational Ticket Bot will be documented in this file.
 
+## [2.2.0] - 2026-04-12
+
+### Changed
+- **No-client-found response (Option A)** — When all lookup passes fail (exact match → fuzzy local → live CW search → still nothing), the bot no longer hard-fails with a red X. It now replies with a clear, instructional message that echoes the unrecognized name, explains the client must exist in ConnectWise first, provides a direct clickable link to the New Company form in ConnectWise, and tells the user to run `Miles: refresh clients` then re-send their message.
+
 ## [2.1.0] - 2026-04-12
 
 ### Added

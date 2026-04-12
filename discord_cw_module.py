@@ -707,7 +707,19 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
         parsed = self.parse_full_ticket_request(text)
         
         if not parsed["client_name"]:
-            await message.reply("❌ Start with a client name (e.g., 'Positive Electric')")
+            # Extract whatever name-like phrase the user typed so we can echo it back
+            raw_name = re.search(r'(?:for|client|company)?\s*([A-Z][\w\s&\'.-]{2,40})', message.content)
+            name_hint = f'"**{raw_name.group(1).strip()}**"' if raw_name else 'that client'
+            cw_url = self.config.get('cw_base_url', 'https://na.myconnectwise.net/v4_6_release/apis/3.0')
+            cw_root = cw_url.split('/v4_6')[0] if '/v4_6' in cw_url else 'https://na.myconnectwise.net'
+            add_company_url = f"{cw_root}/v4_6_release/services/system_io/router/openrecord.rails?locale=en_US&recordType=CompanyFV&recid=0&newWindow=false"
+            await message.reply(
+                f"\u274c I couldn't find {name_hint} in ConnectWise.\n\n"
+                f"Before I can create a ticket, the client needs to exist in ConnectWise first.\n"
+                f"\U0001f449 **Add them here:** [New Company in ConnectWise]({add_company_url})\n\n"
+                f"Once added, type `Miles: refresh clients` and then re-send your message.",
+                mention_author=False
+            )
             return
         
         # If complete, create ticket + schedule
@@ -837,7 +849,16 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
         """Create ticket and optionally schedule appointment"""
         company_id = self.company_mapping.get(parsed["client_name"])
         if not company_id:
-            await message.reply(f"❌ Client '{parsed['client_name']}' not found in mapping")
+            cw_url = self.config.get('cw_base_url', 'https://na.myconnectwise.net/v4_6_release/apis/3.0')
+            cw_root = cw_url.split('/v4_6')[0] if '/v4_6' in cw_url else 'https://na.myconnectwise.net'
+            add_company_url = f"{cw_root}/v4_6_release/services/system_io/router/openrecord.rails?locale=en_US&recordType=CompanyFV&recid=0&newWindow=false"
+            await message.reply(
+                f"\u274c I couldn't find **{parsed['client_name']}** in ConnectWise.\n\n"
+                f"Before I can create a ticket, the client needs to exist in ConnectWise first.\n"
+                f"\U0001f449 **Add them here:** [New Company in ConnectWise]({add_company_url})\n\n"
+                f"Once added, type `Miles: refresh clients` and then re-send your message.",
+                mention_author=False
+            )
             return
         
         # Determine priority
