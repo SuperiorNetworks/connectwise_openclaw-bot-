@@ -44,6 +44,7 @@ Change Log:
   2026-04-12 v2.5.0 - Dual-mode: #cw-ticketing is CW-only; DMs and @mentions use full conversational assistant with persistent memory (Claude Haiku) (Dwain Henderson Jr)
   2026-04-13 v2.6.0 - Added dedicated assistant channels (e.g. #nyc-2026): Miles responds to ALL messages in these channels without requiring @mention (Dwain Henderson Jr)
   2026-04-13 v2.7.0 - Added image vision support in assistant mode: Miles can now read images/screenshots attached to messages in DMs, #nyc-2026, and @mention channels (Dwain Henderson Jr)
+  2026-04-13 v2.7.1 - Fixed work role on time entries: bot now extracts 'Work Role:' line from Discord note, fuzzy-matches it to CW work role list, strips it from the note body, and passes correct workRoleId to /time/entries API (Dwain Henderson Jr)
 """
 
 import re
@@ -608,7 +609,7 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
             print(f"  [file] Upload failed for {image_url}: {e}")
             return {"status": "error", "error": str(e)}
 
-    def log_time(self, ticket_id: int, hours: float, notes: str = "") -> dict:
+    def log_time(self, ticket_id: int, hours: float, notes: str = "", work_role_id: int = None) -> dict:
         """Create a time entry on a ConnectWise ticket via /time/entries"""
         auth = base64.b64encode(
             f"{self.cw_company}+{self.cw_public_key}:{self.cw_private_key}".encode()
@@ -627,6 +628,8 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
             "billableOption": "Billable",
             "notes": notes or ""
         }
+        if work_role_id:
+            payload["workRole"] = {"id": work_role_id}
         try:
             resp = requests.post(
                 f"{self.cw_base_url}/time/entries",
@@ -816,11 +819,60 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
         # Multi-line: always format as bullet list (whether or not instruction was given)
         return '\n'.join(f'• {ln}' for ln in lines)
 
+    def _extract_work_role(self, note: str):
+        """Extract 'Work Role: <name>' line from note text.
+        Returns (work_role_id_or_None, cleaned_note_without_work_role_line).
+        Uses fuzzy matching against the CW work role map."""
+        # Static map of CW work role names -> IDs (from /time/workRoles)
+        WORK_ROLE_MAP = {
+            "software deployment & configuration": 4,
+            "it consulting & advisory services": 5,
+            "sales": 8,
+            "office work": 9,
+            "consultant": 12,
+            "contractor": 13,
+            "(30mins)": 14,
+            "(1hr)": 15,
+            "(2hr)": 16,
+            "(project) 5-10hr": 17,
+            "hardware repair & maintenance": 18,
+            "administrative work": 19,
+            "hardware installation & configuration": 20,
+            "end-user training & onboarding": 21,
+        }
+        # Match 'Work Role: <value>' line (case-insensitive, handles em-dash variants)
+        pattern = re.compile(r'(?im)^\s*work\s+role\s*:\s*(.+?)\s*$')
+        m = pattern.search(note)
+        if not m:
+            return None, note
+        raw_role = m.group(1).strip()
+        # Strip taxable/non-taxable suffix for matching
+        role_clean = re.sub(r'\s*[\u2014\-]+\s*(taxable|non.taxable).*$', '', raw_role, flags=re.IGNORECASE).strip().lower()
+        # Exact match first
+        role_id = WORK_ROLE_MAP.get(role_clean)
+        if not role_id:
+            # Fuzzy: find the work role name with the most word overlap
+            best_id, best_score = None, 0
+            query_words = set(role_clean.split())
+            for name, rid in WORK_ROLE_MAP.items():
+                name_words = set(name.split())
+                score = len(query_words & name_words)
+                if score > best_score:
+                    best_score, best_id = score, rid
+            if best_score > 0:
+                role_id = best_id
+        # Remove the Work Role line from the note
+        cleaned = pattern.sub('', note).strip()
+        return role_id, cleaned
+
     async def _handle_ticket_update(self, message: discord.Message, ticket_id: int, note: str, hours: float = None):
         """Add a note to an existing ConnectWise ticket and optionally log time"""
 
         # Strip 'add time entry' prefix if present (e.g. 'add time entry 22:00 - 22:45')
         note = re.sub(r'(?i)^\s*add\s+time\s+entry\s*', '', note or '').strip()
+
+        # Extract 'Work Role: <name>' line and resolve to CW work role ID
+        work_role_id, note = self._extract_work_role(note)
 
         # Try to extract a time range from the note text (e.g. '22:00 - 22:45')
         if hours is None:
@@ -879,7 +931,8 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
                     "note": note,
                     "uploaded": uploaded,
                     "company_name": company_name,
-                    "summary": summary
+                    "summary": summary,
+                    "work_role_id": work_role_id
                 }
             }
             await message.reply("⏱️ Time to log? (or 'skip')", mention_author=False)
@@ -887,11 +940,22 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
 
         # Log time entry if hours were provided
         time_logged = None
+        work_role_name = None
         if hours:
-            time_result = self.log_time(ticket_id, hours, note)
+            time_result = self.log_time(ticket_id, hours, note, work_role_id=work_role_id)
             if time_result["status"] == "success":
                 time_logged = hours
-                print(f"  ⏱️ Time entry logged: {hours}h on ticket #{ticket_id}")
+                # Resolve work role name for display
+                if work_role_id:
+                    WORK_ROLE_NAMES = {
+                        4: "Software Deployment & Configuration", 5: "IT Consulting & Advisory Services",
+                        8: "Sales", 9: "Office Work", 12: "Consultant", 13: "Contractor",
+                        14: "(30MINS)", 15: "(1HR)", 16: "(2HR)", 17: "(Project) 5-10hr",
+                        18: "Hardware Repair & Maintenance", 19: "Administrative Work",
+                        20: "Hardware Installation & Configuration", 21: "End-User Training & Onboarding"
+                    }
+                    work_role_name = WORK_ROLE_NAMES.get(work_role_id)
+                print(f"  ⏱️ Time entry logged: {hours}h on ticket #{ticket_id}" + (f" [{work_role_name}]" if work_role_name else ""))
             else:
                 print(f"  ⚠️ Time entry failed: {time_result.get('error')}")
 
@@ -904,7 +968,10 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
         )
         embed.add_field(name="Client", value=company_name, inline=True)
         if time_logged:
-            embed.add_field(name="Time Logged", value=f"{time_logged} hrs", inline=True)
+            time_display = f"{time_logged} hrs"
+            if work_role_name:
+                time_display += f" ({work_role_name})"
+            embed.add_field(name="Time Logged", value=time_display, inline=True)
         embed.add_field(name="Note Added", value=note[:500], inline=False)
         if uploaded:
             embed.add_field(name="Files Uploaded", value="\n".join(uploaded), inline=False)
@@ -1742,11 +1809,22 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
                                 pass
                 # Log time if provided
                 time_logged = None
+                work_role_name = None
                 if hours:
-                    time_result = self.log_time(data["ticket_id"], hours, data["note"])
+                    saved_work_role_id = data.get("work_role_id")
+                    time_result = self.log_time(data["ticket_id"], hours, data["note"], work_role_id=saved_work_role_id)
                     if time_result["status"] == "success":
                         time_logged = hours
-                        print(f"  ⏱️ Time entry logged: {hours}h on ticket #{data['ticket_id']}")
+                        if saved_work_role_id:
+                            WORK_ROLE_NAMES = {
+                                4: "Software Deployment & Configuration", 5: "IT Consulting & Advisory Services",
+                                8: "Sales", 9: "Office Work", 12: "Consultant", 13: "Contractor",
+                                14: "(30MINS)", 15: "(1HR)", 16: "(2HR)", 17: "(Project) 5-10hr",
+                                18: "Hardware Repair & Maintenance", 19: "Administrative Work",
+                                20: "Hardware Installation & Configuration", 21: "End-User Training & Onboarding"
+                            }
+                            work_role_name = WORK_ROLE_NAMES.get(saved_work_role_id)
+                        print(f"  ⏱️ Time entry logged: {hours}h on ticket #{data['ticket_id']}" + (f" [{work_role_name}]" if work_role_name else ""))
                     else:
                         print(f"  ⚠️ Time entry failed: {time_result.get('error')}")
                 embed = discord.Embed(
@@ -1757,7 +1835,10 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
                 )
                 embed.add_field(name="Client", value=data.get("company_name", ""), inline=True)
                 if time_logged:
-                    embed.add_field(name="Time Logged", value=f"{time_logged} hrs", inline=True)
+                    time_display = f"{time_logged} hrs"
+                    if work_role_name:
+                        time_display += f" ({work_role_name})"
+                    embed.add_field(name="Time Logged", value=time_display, inline=True)
                 embed.add_field(name="Note Added", value=data["note"][:500], inline=False)
                 if data.get("uploaded"):
                     embed.add_field(name="Files Uploaded", value="\n".join(data["uploaded"]), inline=False)
