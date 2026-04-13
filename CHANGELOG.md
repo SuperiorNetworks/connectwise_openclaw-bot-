@@ -2,6 +2,25 @@
 
 All notable changes to the Discord Conversational Ticket Bot will be documented in this file.
 
+## [2.8.0] - 2026-04-13
+
+### Added
+- **Ticket search feature** — Ask Miles for a company's tickets using natural language:
+  - `tickets for [company]` — lists open tickets (default)
+  - `open tickets for [company]` — explicitly lists open tickets only
+  - `all tickets for [company]` — lists all tickets regardless of status
+  - `show tickets for [company]`, `what tickets are open for [company]`, etc.
+- **Ticket search results embed** — Each result shows `#TICKET_ID — Subject` as a clickable link directly into ConnectWise, plus the current status badge. Up to 50 tickets per query, sorted newest first.
+- **Fuzzy company matching in search** — If the company name isn't recognized exactly, Miles offers up to 3 fuzzy suggestions with a numbered picker (same UX as ticket creation). User picks a number and the search proceeds immediately.
+- **`_search_tickets()` method** — Calls `GET /service/tickets` with `company/id=N AND closedFlag=false` (or without the closed filter for all-tickets mode).
+- **`_send_ticket_search_results()` async helper** — Builds and sends the Discord embed, handling field chunking for companies with many tickets.
+- **`ticket_search_clarify` conversation mode** — Handles the numbered picker follow-up when a company name is ambiguous during a ticket search.
+
+## [2.7.1] - 2026-04-13
+
+### Fixed
+- **Work role on time entries** — The bot now extracts a `Work Role:` line from the Discord note, fuzzy-matches it against the ConnectWise work role list, strips it from the note body, and passes the correct `workRoleId` to the `/time/entries` API. Previously, work role was always `null` in ConnectWise regardless of what was typed.
+
 ## [2.7.0] - 2026-04-13
 
 ### Added

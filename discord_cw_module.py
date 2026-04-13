@@ -45,6 +45,7 @@ Change Log:
   2026-04-13 v2.6.0 - Added dedicated assistant channels (e.g. #nyc-2026): Miles responds to ALL messages in these channels without requiring @mention (Dwain Henderson Jr)
   2026-04-13 v2.7.0 - Added image vision support in assistant mode: Miles can now read images/screenshots attached to messages in DMs, #nyc-2026, and @mention channels (Dwain Henderson Jr)
   2026-04-13 v2.7.1 - Fixed work role on time entries: bot now extracts 'Work Role:' line from Discord note, fuzzy-matches it to CW work role list, strips it from the note body, and passes correct workRoleId to /time/entries API (Dwain Henderson Jr)
+  2026-04-13 v2.8.0 - Ticket search feature: 'tickets for [company]', 'open tickets for [company]', 'all tickets for [company]' — returns embed list with #ID, subject, status, and direct CW link per ticket; fuzzy company matching with numbered picker; supports open-only and all-tickets filters (Dwain Henderson Jr)
 """
 
 import re
@@ -609,6 +610,94 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
             print(f"  [file] Upload failed for {image_url}: {e}")
             return {"status": "error", "error": str(e)}
 
+    def _search_tickets(self, company_id: int, open_only: bool = True) -> list:
+        """Fetch tickets from ConnectWise for a given company ID.
+        Returns list of dicts with id, summary, status name.
+        """
+        auth = base64.b64encode(
+            f"{self.cw_company}+{self.cw_public_key}:{self.cw_private_key}".encode()
+        ).decode()
+        headers = {
+            "Authorization": f"Basic {auth}",
+            "clientId": self.cw_client_id,
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+        }
+        conditions = f"company/id={company_id}"
+        if open_only:
+            conditions += " AND closedFlag=false"
+        try:
+            resp = requests.get(
+                f"{self.cw_base_url}/service/tickets",
+                headers=headers,
+                params={
+                    "conditions": conditions,
+                    "fields": "id,summary,status",
+                    "pageSize": 50,
+                    "orderBy": "id desc"
+                },
+                timeout=15
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            print(f"[search_tickets] Error: {e}")
+            return []
+
+    async def _send_ticket_search_results(
+        self,
+        message: discord.Message,
+        company_name: str,
+        company_id: int,
+        open_only: bool = True
+    ):
+        """Fetch tickets for company_id and reply with a formatted embed list."""
+        filter_label = "Open" if open_only else "All"
+        # Show a thinking indicator
+        async with message.channel.typing():
+            tickets = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: self._search_tickets(company_id, open_only)
+            )
+        if not tickets:
+            no_msg = (
+                f"\U0001f4ed No **{filter_label.lower()} tickets** found for **{company_name}**."
+                if open_only
+                else f"\U0001f4ed No tickets found for **{company_name}**."
+            )
+            await message.reply(no_msg, mention_author=False)
+            return
+        # Build embed
+        embed = discord.Embed(
+            title=f"\U0001f3ab {filter_label} Tickets \u2014 {company_name}",
+            description=f"Showing **{len(tickets)}** {filter_label.lower()} ticket(s)",
+            color=discord.Color.blue()
+        )
+        lines = []
+        for t in tickets:
+            tid = t.get("id")
+            summary = t.get("summary", "(no subject)")[:80]
+            status_name = ""
+            if isinstance(t.get("status"), dict):
+                status_name = t["status"].get("name", "")
+            link = self._generate_deep_link(tid)
+            lines.append(f"[#{tid} \u2014 {summary}]({link})" + (f" `{status_name}`" if status_name else ""))
+        # Discord embed field values are capped at 1024 chars; chunk if needed
+        chunk = []
+        chunk_size = 0
+        field_num = 1
+        for line in lines:
+            if chunk_size + len(line) + 1 > 1000:
+                embed.add_field(name=f"Tickets (cont.)", value="\n".join(chunk), inline=False)
+                chunk = []
+                chunk_size = 0
+                field_num += 1
+            chunk.append(line)
+            chunk_size += len(line) + 1
+        if chunk:
+            embed.add_field(name="Tickets", value="\n".join(chunk), inline=False)
+        embed.set_footer(text=f"ConnectWise \u2022 {filter_label} tickets for {company_name}")
+        await message.reply(embed=embed, mention_author=False)
+
     def log_time(self, ticket_id: int, hours: float, notes: str = "", work_role_id: int = None) -> dict:
         """Create a time entry on a ConnectWise ticket via /time/entries"""
         auth = base64.b64encode(
@@ -728,6 +817,62 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
     
     async def handle_ticket_request(self, message: discord.Message, text: str):
         """Try to parse and handle a complete ticket request"""
+
+        # ── Ticket search intent ──────────────────────────────────────────────
+        # Matches: "what tickets are open for X", "show all tickets for X",
+        #          "list tickets for X", "tickets for X", "open tickets X"
+        search_match = re.search(
+            r'(?i)(?:what|show|list|get|find|search|display)?\s*'
+            r'(?:(?:all|open|closed|active)\s+)?'
+            r'tickets?\s+(?:for|from|of|on|by|with)?\s+(.+)',
+            text
+        )
+        if search_match:
+            # Also detect if user wants all tickets vs open only
+            open_only = not re.search(r'\ball\b', text, re.IGNORECASE)
+            # If 'closed' is mentioned, show all (closed+open)
+            if re.search(r'\bclosed\b', text, re.IGNORECASE):
+                open_only = False
+            raw_name = search_match.group(1).strip()
+            # Strip trailing punctuation
+            raw_name = re.sub(r'[?!.]+$', '', raw_name).strip()
+            # Look up the company in our mapping
+            company_name = self._extract_client_name(raw_name)
+            if not company_name:
+                # Try fuzzy suggestions
+                suggestions = self._fuzzy_suggest_clients(raw_name)
+                if suggestions:
+                    lines = [f"❓ I don't recognize **\"{raw_name}\"**. Did you mean one of these?\n"]
+                    for i, name in enumerate(suggestions, 1):
+                        lines.append(f"`{i}` {name}")
+                    lines.append(f"`{len(suggestions)+1}` None of these")
+                    lines.append("\n*(Reply with a number)*")
+                    # Store context so user can pick
+                    self.conversations[message.author.id] = {
+                        'mode': 'ticket_search_clarify',
+                        'stage': 'pick',
+                        'data': {
+                            'suggestions': suggestions,
+                            'none_idx': len(suggestions) + 1,
+                            'open_only': open_only
+                        }
+                    }
+                    await message.reply("\n".join(lines), mention_author=False)
+                    return
+                else:
+                    await message.reply(
+                        f"❌ I couldn't find **\"{raw_name}\"** in ConnectWise.\n"
+                        f"👉 [Add them here: New Company in ConnectWise](https://na.myconnectwise.net/v2025_1/ConnectWise.aspx?routeTo=NewCompany)",
+                        mention_author=False
+                    )
+                    return
+            # Company found — look up its CW ID
+            company_id = self.company_mapping.get(company_name)
+            if not company_id:
+                await message.reply(f"❌ Found client **{company_name}** in local list but couldn't get their ConnectWise ID. Try `Miles: refresh clients`.")
+                return
+            await self._send_ticket_search_results(message, company_name, company_id, open_only)
+            return
 
         # ── 'add time entry HH:MM - HH:MM' without a ticket number ────────────
         # e.g. "add time entry 22:00 - 22:45" with no ticket number supplied
@@ -1709,6 +1854,43 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
                 ticket_id = int(t_match.group(1))
                 # Route to update handler with the original time-entry text as the note
                 await self._handle_ticket_update(message, ticket_id, pending_text)
+                return
+
+            # ── ticket_search_clarify — user is picking a company for ticket search ──
+            if conv.get("mode") == "ticket_search_clarify" and conv.get("stage") == "pick":
+                data = conv["data"]
+                suggestions = data["suggestions"]
+                none_idx = data["none_idx"]
+                open_only = data.get("open_only", True)
+                reply = content.strip()
+                chosen_name = None
+                chosen_id = None
+                num_match = re.fullmatch(r'(\d+)', reply)
+                if num_match:
+                    choice = int(num_match.group(1))
+                    if 1 <= choice <= len(suggestions):
+                        chosen_name = suggestions[choice - 1]
+                        chosen_id = self.company_mapping.get(chosen_name)
+                    elif choice == none_idx:
+                        del self.conversations[user_id]
+                        await message.reply(
+                            "Got it. I couldn't find the company. Please check the name or add them to ConnectWise.",
+                            mention_author=False
+                        )
+                        return
+                else:
+                    # User typed a name — try to match
+                    chosen_name = self._extract_client_name(reply)
+                    if chosen_name:
+                        chosen_id = self.company_mapping.get(chosen_name)
+                if not chosen_name or not chosen_id:
+                    await message.reply(
+                        f"\u274c I didn't understand that choice. Please reply with a number (1\u2013{none_idx}).",
+                        mention_author=False
+                    )
+                    return
+                del self.conversations[user_id]
+                await self._send_ticket_search_results(message, chosen_name, chosen_id, open_only)
                 return
 
             # ── client_clarify — user is picking from a numbered suggestion list ──
