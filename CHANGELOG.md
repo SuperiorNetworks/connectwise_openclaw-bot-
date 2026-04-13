@@ -2,6 +2,13 @@
 
 All notable changes to the Discord Conversational Ticket Bot will be documented in this file.
 
+## [2.7.0] - 2026-04-13
+
+### Added
+- **Image vision support in assistant mode** — Miles can now read images and screenshots attached to messages in DMs, `#nyc-2026`, and any `@mention` channel. Images are downloaded from Discord, base64-encoded, and passed to Claude's vision API. Supported formats: PNG, JPG, JPEG, GIF, WEBP.
+- If only an image is attached with no text, Miles will automatically describe and analyze it.
+- Images in `#cw-ticketing` continue to be uploaded directly to ConnectWise tickets (unchanged).
+
 ## [2.6.0] - 2026-04-13
 
 ### Added

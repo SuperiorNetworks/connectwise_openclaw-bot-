@@ -43,6 +43,7 @@ Change Log:
   2026-04-12 v2.1.0 - Live ConnectWise company sync: pulls full client list on startup, auto-refreshes every 24 hours as background task, manual refresh via 'Miles: refresh clients' command (Dwain Henderson Jr)
   2026-04-12 v2.5.0 - Dual-mode: #cw-ticketing is CW-only; DMs and @mentions use full conversational assistant with persistent memory (Claude Haiku) (Dwain Henderson Jr)
   2026-04-13 v2.6.0 - Added dedicated assistant channels (e.g. #nyc-2026): Miles responds to ALL messages in these channels without requiring @mention (Dwain Henderson Jr)
+  2026-04-13 v2.7.0 - Added image vision support in assistant mode: Miles can now read images/screenshots attached to messages in DMs, #nyc-2026, and @mention channels (Dwain Henderson Jr)
 """
 
 import re
@@ -1267,13 +1268,54 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
 
         # Strip @Miles mention from content if present
         clean_content = re.sub(r'<@!?\d+>', '', content).strip()
-        if not clean_content:
+
+        # ── Build user message content (text + any image attachments) ───────
+        # Claude vision format: content is a list of blocks when images are present
+        user_content_blocks = []
+
+        # Process image attachments for vision
+        image_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.webp'}
+        media_type_map = {
+            '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+            '.gif': 'image/gif', '.webp': 'image/webp'
+        }
+        for att in message.attachments:
+            ext = '.' + att.filename.rsplit('.', 1)[-1].lower() if '.' in att.filename else ''
+            if ext in image_extensions:
+                try:
+                    import urllib.request as _ur
+                    img_bytes = await asyncio.get_event_loop().run_in_executor(
+                        None, lambda url=att.url: _ur.urlopen(url, timeout=15).read()
+                    )
+                    img_b64 = base64.b64encode(img_bytes).decode('utf-8')
+                    user_content_blocks.append({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": media_type_map.get(ext, 'image/jpeg'),
+                            "data": img_b64
+                        }
+                    })
+                except Exception as img_err:
+                    print(f"[Vision] Failed to load image {att.filename}: {img_err}")
+
+        # Add text block (required even if empty when images are present)
+        if clean_content:
+            user_content_blocks.append({"type": "text", "text": clean_content})
+        elif user_content_blocks:
+            # Images only, no text — add a prompt
+            user_content_blocks.append({"type": "text", "text": "Please describe and analyze this image."})
+        else:
+            # No text, no images
             await message.reply("Hey! What can I help you with?", mention_author=False)
             return
 
+        # Use plain string for text-only messages (keeps history serializable)
+        user_message_content = user_content_blocks if user_content_blocks else clean_content
+
         # Build short-term history for this user
         history = self.assistant_conversations.get(user_id, [])
-        history.append({"role": "user", "content": clean_content})
+        history.append({"role": "user", "content": user_message_content})
 
         # Build system prompt with persistent memory injected
         memory_block = self._memory_context_block()
