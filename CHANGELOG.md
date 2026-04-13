@@ -2,6 +2,12 @@
 
 All notable changes to the Discord Conversational Ticket Bot will be documented in this file.
 
+## [2.6.0] - 2026-04-13
+
+### Added
+- **Dedicated assistant channels** — Any channel can be configured as a dedicated assistant channel where Miles responds to every message without requiring an `@mention`. The first dedicated channel is `#nyc-2026` (ID `1482497618973032509`). Additional channels can be added to `assistant_channel_ids` in the config file at any time.
+- **`assistant_channel_ids` config key** — A new array in `discord_cw_ticket_config.json` that lists channel IDs where Miles operates in full assistant mode for all messages.
+
 ## [2.5.0] - 2026-04-12
 
 ### Added

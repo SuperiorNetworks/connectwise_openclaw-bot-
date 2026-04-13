@@ -42,6 +42,7 @@ Change Log:
   2026-04-11 v2.0.9 - Added log_time() API method; time range parser (HH:MM - HH:MM); update flow now creates CW time entry and asks for time if not provided (Dwain Henderson Jr)
   2026-04-12 v2.1.0 - Live ConnectWise company sync: pulls full client list on startup, auto-refreshes every 24 hours as background task, manual refresh via 'Miles: refresh clients' command (Dwain Henderson Jr)
   2026-04-12 v2.5.0 - Dual-mode: #cw-ticketing is CW-only; DMs and @mentions use full conversational assistant with persistent memory (Claude Haiku) (Dwain Henderson Jr)
+  2026-04-13 v2.6.0 - Added dedicated assistant channels (e.g. #nyc-2026): Miles responds to ALL messages in these channels without requiring @mention (Dwain Henderson Jr)
 """
 
 import re
@@ -74,6 +75,8 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
         self.bot = bot
         self.config = config
         self.channel_id = int(config.get("discord_channel_id", 0))
+        # Dedicated assistant channels — Miles responds to every message (no @mention needed)
+        self.assistant_channel_ids: set = set(int(x) for x in config.get("assistant_channel_ids", []))
         self.guild_id = config.get("discord_guild_id")
         
         # CW API config
@@ -1522,7 +1525,7 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
         """
         Main message listener — dual-mode routing:
           - #cw-ticketing channel: ConnectWise only (tickets, time entries, updates)
-          - DMs and any channel where @Miles is mentioned: full assistant with persistent memory
+          - DMs, any channel where @Miles is mentioned, and dedicated assistant channels: full assistant with persistent memory
         """
         if message.author == self.bot.user:
             return
@@ -1530,9 +1533,10 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
         is_dm = isinstance(message.channel, discord.DMChannel)
         is_cw_channel = message.channel.id == self.channel_id
         is_mentioned = self.bot.user in message.mentions
+        is_assistant_channel = message.channel.id in self.assistant_channel_ids
 
         # Ignore messages that don't involve Miles at all
-        if not (is_dm or is_cw_channel or is_mentioned):
+        if not (is_dm or is_cw_channel or is_mentioned or is_assistant_channel):
             return
 
         print(f"\n[{datetime.now().isoformat()}] {message.author}: {message.content[:80]}")
@@ -1540,8 +1544,8 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
         user_id = message.author.id
         content = message.content.strip()
 
-        # ── ASSISTANT MODE: DMs and @mentions outside #cw-ticketing ─────────
-        if (is_dm or is_mentioned) and not is_cw_channel:
+        # ── ASSISTANT MODE: DMs, @mentions, and dedicated assistant channels ──
+        if (is_dm or is_mentioned or is_assistant_channel) and not is_cw_channel:
             # Miles: / AI: commands still work in assistant mode
             miles_match = re.search(r'(?im)^(?:miles|ai)\s*:\s*(.+?)(?:\n|$)', content)
             if miles_match:
