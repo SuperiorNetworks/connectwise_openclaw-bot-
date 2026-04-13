@@ -2,6 +2,14 @@
 
 All notable changes to the Discord Conversational Ticket Bot will be documented in this file.
 
+## [2.9.0] - 2026-04-13
+
+### Fixed
+- **Time entry note routing** — When a time entry is logged, the note now goes **on the Time Entry only** (visible in CW Time & Expense), not on the ticket Discussion. Previously the note was always posted to the Discussion first, then also passed to the time entry, creating a duplicate.
+- **Skip-time flow** — When the user replies `skip` to the "Time to log?" prompt, the note is now correctly posted to the ticket **Discussion** (as before). This ensures notes always land somewhere useful regardless of whether time is logged.
+- **Fallback on time entry failure** — If the CW `/time/entries` API call fails, the bot now falls back to posting the note to the Discussion so nothing is lost.
+- **Embed field labels** — Confirmation embed now shows `Note on Time Entry` when time is logged, and `Note Added to Discussion` when time is skipped, making it clear where the note landed in ConnectWise.
+
 ## [2.8.0] - 2026-04-13
 
 ### Added
