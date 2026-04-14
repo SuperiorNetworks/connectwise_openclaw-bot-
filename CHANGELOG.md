@@ -2,6 +2,11 @@
 
 All notable changes to the Discord Conversational Ticket Bot will be documented in this file.
 
+## [2.9.1] - 2026-04-13
+
+### Fixed
+- **Ticket search regex** — The search intent now correctly matches natural language patterns where `are open`, `are there`, or `are active` appears between `tickets` and `for`. Previously, phrases like `"what open tickets are open for RLS?"` and `"what tickets are open for RLS?"` fell through to the ticket creation flow (which asked for a subject), because the regex did not account for the verb phrase after `tickets`. The fix adds an optional `(?:are\s+)?(?:open|closed|all|there|active)\s+` group between `tickets?` and the `for/from/of` preposition.
+
 ## [2.9.0] - 2026-04-13
 
 ### Fixed

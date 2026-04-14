@@ -47,6 +47,7 @@ Change Log:
   2026-04-13 v2.7.1 - Fixed work role on time entries: bot now extracts 'Work Role:' line from Discord note, fuzzy-matches it to CW work role list, strips it from the note body, and passes correct workRoleId to /time/entries API (Dwain Henderson Jr)
   2026-04-13 v2.8.0 - Ticket search feature: 'tickets for [company]', 'open tickets for [company]', 'all tickets for [company]' — returns embed list with #ID, subject, status, and direct CW link per ticket; fuzzy company matching with numbered picker; supports open-only and all-tickets filters (Dwain Henderson Jr)
   2026-04-13 v2.9.0 - Fixed time entry flow: note now goes on the CW Time Entry only when time is logged; note goes to ticket Discussion only when time is skipped; removed duplicate Discussion post when time is provided (Dwain Henderson Jr)
+  2026-04-13 v2.9.1 - Fixed ticket search regex: now correctly matches 'what open tickets are open for X', 'what tickets are open for X', 'what tickets are there for X' patterns where 'are open/there/active' appears between 'tickets' and 'for' (Dwain Henderson Jr)
 """
 
 import re
@@ -820,12 +821,16 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
         """Try to parse and handle a complete ticket request"""
 
         # ── Ticket search intent ──────────────────────────────────────────────
-        # Matches: "what tickets are open for X", "show all tickets for X",
-        #          "list tickets for X", "tickets for X", "open tickets X"
+        # Matches: "tickets for X", "open tickets for X", "all tickets for X",
+        #          "what open tickets are open for X", "what tickets are open for X",
+        #          "what tickets are there for X", "show all tickets for X",
+        #          "list tickets for X", "find tickets for X"
         search_match = re.search(
             r'(?i)(?:what|show|list|get|find|search|display)?\s*'
             r'(?:(?:all|open|closed|active)\s+)?'
-            r'tickets?\s+(?:for|from|of|on|by|with)?\s+(.+)',
+            r'tickets?\s+'
+            r'(?:(?:are\s+)?(?:open|closed|all|there|active)\s+)?'
+            r'(?:for|from|of|on|by|with)?\s*(.+)',
             text
         )
         if search_match:
