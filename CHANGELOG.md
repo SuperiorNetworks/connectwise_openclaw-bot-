@@ -2,6 +2,16 @@
 
 All notable changes to the Discord Conversational Ticket Bot will be documented in this file.
 
+## [2.9.3] - 2026-04-14
+
+### Added
+- **Configurable service board filter** — Ticket search now restricts results to specific ConnectWise service boards. Defaults to `IT Support` and `GTD - Pet_Projects`. Board names are resolved to IDs automatically at bot startup via the CW API. To change the boards, update `ticket_search_boards` in the config JSON (e.g., `["IT Support", "My Other Board"]`). Set to `[]` to disable the filter and return tickets from all boards.
+
+## [2.9.2] - 2026-04-14
+
+### Fixed
+- **Embed size limit on large ticket results** — Ticket searches returning 50 tickets could silently fail because the total embed size exceeded Discord's 6,000 character limit. The bot now automatically splits large result sets across multiple embeds (each staying safely under the limit). Each continuation embed is labelled `(cont.)` and a `Part N/M` footer is shown when multiple embeds are sent. A plain-text fallback is also in place if an embed send fails for any reason.
+
 ## [2.9.1] - 2026-04-13
 
 ### Fixed

@@ -48,6 +48,8 @@ Change Log:
   2026-04-13 v2.8.0 - Ticket search feature: 'tickets for [company]', 'open tickets for [company]', 'all tickets for [company]' — returns embed list with #ID, subject, status, and direct CW link per ticket; fuzzy company matching with numbered picker; supports open-only and all-tickets filters (Dwain Henderson Jr)
   2026-04-13 v2.9.0 - Fixed time entry flow: note now goes on the CW Time Entry only when time is logged; note goes to ticket Discussion only when time is skipped; removed duplicate Discussion post when time is provided (Dwain Henderson Jr)
   2026-04-13 v2.9.1 - Fixed ticket search regex: now correctly matches 'what open tickets are open for X', 'what tickets are open for X', 'what tickets are there for X' patterns where 'are open/there/active' appears between 'tickets' and 'for' (Dwain Henderson Jr)
+  2026-04-14 v2.9.2 - Fixed ticket search embed size limit: large result sets (50 tickets) now send multiple embeds instead of silently failing Discord's 6000 char total embed limit; added HTTPException fallback to plain text (Dwain Henderson Jr)
+  2026-04-14 v2.9.3 - Added configurable service board filter for ticket search: defaults to 'IT Support' and 'GTD - Pet_Projects' boards only; board names resolved to IDs at startup via CW API; set ticket_search_boards:[] in config to disable filter (Dwain Henderson Jr)
 """
 
 import re
@@ -98,6 +100,14 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
         self.priority_ids = config.get("priority_ids", {})
         self.default_priority_id = config.get("default_priority_id", 8)
         
+        # ── Ticket search board filter ────────────────────────────────────────
+        # List of board names to restrict ticket searches to.
+        # Empty list = no filter (all boards). Resolved to IDs at startup.
+        self.ticket_search_board_names: list = config.get(
+            "ticket_search_boards", ["IT Support", "GTD - Pet_Projects"]
+        )
+        self._ticket_search_board_ids: list = []  # populated by _resolve_board_ids()
+
         # Conversation state (ConnectWise ticket flows)
         self.conversations = {}
 
@@ -612,8 +622,52 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
             print(f"  [file] Upload failed for {image_url}: {e}")
             return {"status": "error", "error": str(e)}
 
+    async def _resolve_board_ids(self):
+        """Resolve self.ticket_search_board_names to CW board IDs and cache in
+        self._ticket_search_board_ids.  Called once at startup.
+        If ticket_search_board_names is empty, no filter is applied.
+        """
+        if not self.ticket_search_board_names:
+            self._ticket_search_board_ids = []
+            print("[BoardFilter] No board names configured — ticket search will return all boards")
+            return
+        auth = base64.b64encode(
+            f"{self.cw_company}+{self.cw_public_key}:{self.cw_private_key}".encode()
+        ).decode()
+        headers = {
+            "Authorization": f"Basic {auth}",
+            "clientId": self.cw_client_id,
+            "Accept": "application/json"
+        }
+        try:
+            resp = requests.get(
+                f"{self.cw_base_url}/service/boards",
+                headers=headers,
+                params={"pageSize": 200, "fields": "id,name"},
+                timeout=10
+            )
+            resp.raise_for_status()
+            all_boards = resp.json()
+            # Match by exact name (case-insensitive)
+            name_lower = {b["name"].lower(): b["id"] for b in all_boards if "name" in b}
+            resolved = []
+            for wanted in self.ticket_search_board_names:
+                bid = name_lower.get(wanted.lower())
+                if bid:
+                    resolved.append(bid)
+                    print(f"[BoardFilter] Resolved '{wanted}' -> board ID {bid}")
+                else:
+                    print(f"[BoardFilter] WARNING: board '{wanted}' not found in CW — skipping")
+            self._ticket_search_board_ids = resolved
+            if resolved:
+                print(f"[BoardFilter] Active board filter: {self.ticket_search_board_names} -> IDs {resolved}")
+        except Exception as e:
+            print(f"[BoardFilter] Failed to resolve board IDs: {e} — no board filter applied")
+            self._ticket_search_board_ids = []
+
     def _search_tickets(self, company_id: int, open_only: bool = True) -> list:
         """Fetch tickets from ConnectWise for a given company ID.
+        Filters by self._ticket_search_board_ids when configured.
         Returns list of dicts with id, summary, status name.
         """
         auth = base64.b64encode(
@@ -628,13 +682,17 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
         conditions = f"company/id={company_id}"
         if open_only:
             conditions += " AND closedFlag=false"
+        # Apply board filter if board IDs have been resolved
+        if self._ticket_search_board_ids:
+            board_cond = " OR ".join(f"board/id={bid}" for bid in self._ticket_search_board_ids)
+            conditions += f" AND ({board_cond})"
         try:
             resp = requests.get(
                 f"{self.cw_base_url}/service/tickets",
                 headers=headers,
                 params={
                     "conditions": conditions,
-                    "fields": "id,summary,status",
+                    "fields": "id,summary,status,board",
                     "pageSize": 50,
                     "orderBy": "id desc"
                 },
@@ -653,7 +711,9 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
         company_id: int,
         open_only: bool = True
     ):
-        """Fetch tickets for company_id and reply with a formatted embed list."""
+        """Fetch tickets for company_id and reply with a formatted embed list.
+        Handles Discord's 6000 char total embed limit by sending multiple embeds.
+        """
         filter_label = "Open" if open_only else "All"
         # Show a thinking indicator
         async with message.channel.typing():
@@ -668,12 +728,7 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
             )
             await message.reply(no_msg, mention_author=False)
             return
-        # Build embed
-        embed = discord.Embed(
-            title=f"\U0001f3ab {filter_label} Tickets \u2014 {company_name}",
-            description=f"Showing **{len(tickets)}** {filter_label.lower()} ticket(s)",
-            color=discord.Color.blue()
-        )
+        # Build all ticket lines first
         lines = []
         for t in tickets:
             tid = t.get("id")
@@ -683,22 +738,74 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
                 status_name = t["status"].get("name", "")
             link = self._generate_deep_link(tid)
             lines.append(f"[#{tid} \u2014 {summary}]({link})" + (f" `{status_name}`" if status_name else ""))
-        # Discord embed field values are capped at 1024 chars; chunk if needed
-        chunk = []
-        chunk_size = 0
-        field_num = 1
+        # Pack lines into field-sized chunks (Discord field value limit: 1024 chars)
+        # Then pack fields into embed-sized groups (Discord embed total limit: ~5800 chars safe)
+        FIELD_LIMIT = 1000   # leave buffer below 1024
+        EMBED_LIMIT = 5500   # leave buffer below 6000 (title+desc+footer take ~200)
+        # Step 1: build field chunks
+        field_chunks = []
+        cur_chunk = []
+        cur_size = 0
         for line in lines:
-            if chunk_size + len(line) + 1 > 1000:
-                embed.add_field(name=f"Tickets (cont.)", value="\n".join(chunk), inline=False)
-                chunk = []
-                chunk_size = 0
-                field_num += 1
-            chunk.append(line)
-            chunk_size += len(line) + 1
-        if chunk:
-            embed.add_field(name="Tickets", value="\n".join(chunk), inline=False)
-        embed.set_footer(text=f"ConnectWise \u2022 {filter_label} tickets for {company_name}")
-        await message.reply(embed=embed, mention_author=False)
+            if cur_size + len(line) + 1 > FIELD_LIMIT:
+                field_chunks.append("\n".join(cur_chunk))
+                cur_chunk = []
+                cur_size = 0
+            cur_chunk.append(line)
+            cur_size += len(line) + 1
+        if cur_chunk:
+            field_chunks.append("\n".join(cur_chunk))
+        # Step 2: group field chunks into embeds respecting the total embed size limit
+        embeds = []
+        cur_embed_fields = []
+        cur_embed_size = len(company_name) + len(filter_label) + 60  # title+desc+footer approx
+        for i, field_text in enumerate(field_chunks):
+            field_size = len(field_text) + 20  # field name overhead
+            if cur_embed_size + field_size > EMBED_LIMIT and cur_embed_fields:
+                embeds.append(cur_embed_fields)
+                cur_embed_fields = []
+                cur_embed_size = 40  # continuation embed overhead
+            cur_embed_fields.append(field_text)
+            cur_embed_size += field_size
+        if cur_embed_fields:
+            embeds.append(cur_embed_fields)
+        # Step 3: send embeds
+        total_count = len(tickets)
+        for embed_idx, field_group in enumerate(embeds):
+            is_first = (embed_idx == 0)
+            is_last = (embed_idx == len(embeds) - 1)
+            if is_first:
+                title = f"\U0001f3ab {filter_label} Tickets \u2014 {company_name}"
+                description = f"Showing **{total_count}** {filter_label.lower()} ticket(s)"
+            else:
+                title = f"\U0001f3ab {filter_label} Tickets \u2014 {company_name} (cont.)"
+                description = None
+            embed = discord.Embed(
+                title=title,
+                description=description,
+                color=discord.Color.blue()
+            )
+            for j, field_text in enumerate(field_group):
+                field_name = "Tickets" if (is_first and j == 0) else "Tickets (cont.)"
+                embed.add_field(name=field_name, value=field_text, inline=False)
+            if is_last:
+                page_info = f" \u2022 Part {embed_idx+1}/{len(embeds)}" if len(embeds) > 1 else ""
+                embed.set_footer(text=f"ConnectWise \u2022 {filter_label} tickets for {company_name}{page_info}")
+            try:
+                if is_first:
+                    await message.reply(embed=embed, mention_author=False)
+                else:
+                    await message.channel.send(embed=embed)
+            except discord.HTTPException as e:
+                print(f"[send_ticket_search_results] Embed send failed (part {embed_idx+1}): {e}")
+                # Fallback: send as plain text
+                plain = f"**{title}**\n" + "\n".join(
+                    line for field_text in field_group for line in field_text.split("\n")
+                )
+                if is_first:
+                    await message.reply(plain[:2000], mention_author=False)
+                else:
+                    await message.channel.send(plain[:2000])
 
     def log_time(self, ticket_id: int, hours: float, notes: str = "", work_role_id: int = None) -> dict:
         """Create a time entry on a ConnectWise ticket via /time/entries"""
@@ -1582,6 +1689,8 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
         count = await self._sync_companies()
         if count:
             print(f"[CompanySync] Startup sync complete: {count} companies ready")
+        # Resolve board names to IDs for ticket search filtering
+        await self._resolve_board_ids()
         if not self._company_refresh_task.is_running():
             self._company_refresh_task.start()
             print("[CompanySync] 24-hour background refresh task started")
