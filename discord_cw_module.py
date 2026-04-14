@@ -46,6 +46,8 @@ Change Log:
   2026-04-13 v2.7.0 - Added image vision support in assistant mode: Miles can now read images/screenshots attached to messages in DMs, #nyc-2026, and @mention channels (Dwain Henderson Jr)
   2026-04-13 v2.7.1 - Fixed work role on time entries: bot now extracts 'Work Role:' line from Discord note, fuzzy-matches it to CW work role list, strips it from the note body, and passes correct workRoleId to /time/entries API (Dwain Henderson Jr)
   2026-04-13 v2.8.0 - Ticket search feature: 'tickets for [company]', 'open tickets for [company]', 'all tickets for [company]' — returns embed list with #ID, subject, status, and direct CW link per ticket; fuzzy company matching with numbered picker; supports open-only and all-tickets filters (Dwain Henderson Jr)
+  2026-04-13 v2.9.0 - Fixed time entry flow: note now goes on the CW Time Entry only when time is logged; note goes to ticket Discussion only when time is skipped; removed duplicate Discussion post when time is provided (Dwain Henderson Jr)
+  2026-04-13 v2.9.1 - Fixed ticket search regex: now correctly matches 'what open tickets are open for X', 'what tickets are open for X', 'what tickets are there for X' patterns where 'are open/there/active' appears between 'tickets' and 'for' (Dwain Henderson Jr)
 """
 
 import re
@@ -819,12 +821,16 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
         """Try to parse and handle a complete ticket request"""
 
         # ── Ticket search intent ──────────────────────────────────────────────
-        # Matches: "what tickets are open for X", "show all tickets for X",
-        #          "list tickets for X", "tickets for X", "open tickets X"
+        # Matches: "tickets for X", "open tickets for X", "all tickets for X",
+        #          "what open tickets are open for X", "what tickets are open for X",
+        #          "what tickets are there for X", "show all tickets for X",
+        #          "list tickets for X", "find tickets for X"
         search_match = re.search(
             r'(?i)(?:what|show|list|get|find|search|display)?\s*'
             r'(?:(?:all|open|closed|active)\s+)?'
-            r'tickets?\s+(?:for|from|of|on|by|with)?\s+(.+)',
+            r'tickets?\s+'
+            r'(?:(?:are\s+)?(?:open|closed|all|there|active)\s+)?'
+            r'(?:for|from|of|on|by|with)?\s*(.+)',
             text
         )
         if search_match:
@@ -1052,12 +1058,6 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
         # Format note: auto-bullet multi-line notes, strip formatting instructions
         note = self._format_note(note)
 
-        # Post the note
-        update_result = self.update_ticket(ticket_id, note)
-        if update_result["status"] != "success":
-            await message.reply(f"❌ Failed to update ticket: {update_result.get('error')}")
-            return
-
         # Upload any Discord attachments (images, PDFs, files) to ConnectWise
         uploaded = []
         if message.attachments:
@@ -1066,7 +1066,10 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
                 if result["status"] == "success":
                     uploaded.append(att.filename)
 
-        # If no time provided yet, ask for it and save state
+        # If no time provided yet, ask for it and save state.
+        # We do NOT post to Discussion yet — we wait to see if the user logs time.
+        # If time is logged: note goes on the time entry only.
+        # If time is skipped: note goes to the ticket Discussion.
         if hours is None:
             self.conversations[message.author.id] = {
                 "mode": "update",
@@ -1083,14 +1086,14 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
             await message.reply("⏱️ Time to log? (or 'skip')", mention_author=False)
             return
 
-        # Log time entry if hours were provided
+        # Hours were provided inline (e.g. time range in the original message).
+        # Put the note on the time entry only — skip Discussion post.
         time_logged = None
         work_role_name = None
         if hours:
             time_result = self.log_time(ticket_id, hours, note, work_role_id=work_role_id)
             if time_result["status"] == "success":
                 time_logged = hours
-                # Resolve work role name for display
                 if work_role_id:
                     WORK_ROLE_NAMES = {
                         4: "Software Deployment & Configuration", 5: "IT Consulting & Advisory Services",
@@ -1103,6 +1106,11 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
                 print(f"  ⏱️ Time entry logged: {hours}h on ticket #{ticket_id}" + (f" [{work_role_name}]" if work_role_name else ""))
             else:
                 print(f"  ⚠️ Time entry failed: {time_result.get('error')}")
+                # Time entry failed — fall back to posting as Discussion note
+                update_result = self.update_ticket(ticket_id, note)
+                if update_result["status"] != "success":
+                    await message.reply(f"❌ Failed to log time and failed to post note: {update_result.get('error')}")
+                    return
 
         # Build confirmation embed
         embed = discord.Embed(
@@ -1117,13 +1125,13 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
             if work_role_name:
                 time_display += f" ({work_role_name})"
             embed.add_field(name="Time Logged", value=time_display, inline=True)
-        embed.add_field(name="Note Added", value=note[:500], inline=False)
+        embed.add_field(name="Note on Time Entry", value=note[:500], inline=False)
         if uploaded:
             embed.add_field(name="Files Uploaded", value="\n".join(uploaded), inline=False)
         embed.add_field(name="Link", value=f"[Open in ConnectWise]({self._generate_deep_link(ticket_id)})", inline=False)
         embed.set_footer(text=f"Updated by {message.author.name}")
         await message.reply(embed=embed, mention_author=False)
-        print(f"✅ Updated ticket #{ticket_id} with note{', ' + str(time_logged) + 'h time entry' if time_logged else ''}{' + ' + str(len(uploaded)) + ' file(s)' if uploaded else ''}")
+        print(f"✅ Ticket #{ticket_id}: time entry note logged{', ' + str(time_logged) + 'h' if time_logged else ''}{' + ' + str(len(uploaded)) + ' file(s)' if uploaded else ''}")
     
     async def _create_ticket_and_schedule(self, message: discord.Message, parsed: Dict[str, Any]):
         """Create ticket and optionally schedule appointment"""
@@ -1989,7 +1997,8 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
                                 hours = float(content.strip())
                             except ValueError:
                                 pass
-                # Log time if provided
+                # If user skipped time: post note to Discussion
+                # If user provided time: put note on the time entry only
                 time_logged = None
                 work_role_name = None
                 if hours:
@@ -2009,6 +2018,15 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
                         print(f"  ⏱️ Time entry logged: {hours}h on ticket #{data['ticket_id']}" + (f" [{work_role_name}]" if work_role_name else ""))
                     else:
                         print(f"  ⚠️ Time entry failed: {time_result.get('error')}")
+                        # Time entry failed — fall back to posting note to Discussion
+                        self.update_ticket(data["ticket_id"], data["note"])
+                else:
+                    # User skipped time — post note to ticket Discussion
+                    update_result = self.update_ticket(data["ticket_id"], data["note"])
+                    if update_result["status"] != "success":
+                        await message.reply(f"❌ Failed to post note to ticket: {update_result.get('error')}", mention_author=False)
+                        return
+                    print(f"  📝 Note posted to Discussion on ticket #{data['ticket_id']} (time skipped)")
                 embed = discord.Embed(
                     title=f"✅ Ticket #{data['ticket_id']} Updated",
                     description=data.get("summary", ""),
@@ -2021,7 +2039,9 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
                     if work_role_name:
                         time_display += f" ({work_role_name})"
                     embed.add_field(name="Time Logged", value=time_display, inline=True)
-                embed.add_field(name="Note Added", value=data["note"][:500], inline=False)
+                    embed.add_field(name="Note on Time Entry", value=data["note"][:500], inline=False)
+                else:
+                    embed.add_field(name="Note Added to Discussion", value=data["note"][:500], inline=False)
                 if data.get("uploaded"):
                     embed.add_field(name="Files Uploaded", value="\n".join(data["uploaded"]), inline=False)
                 embed.add_field(name="Link", value=f"[Open in ConnectWise]({self._generate_deep_link(data['ticket_id'])})", inline=False)
