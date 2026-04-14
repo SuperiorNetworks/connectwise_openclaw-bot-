@@ -2,6 +2,11 @@
 
 All notable changes to the Discord Conversational Ticket Bot will be documented in this file.
 
+## [2.9.4] - 2026-04-14
+
+### Added
+- **Universal cancel command** — Typing `stop`, `exit`, `quit`, `cancel`, `abort`, `nevermind`, or `never mind` on a line by itself now immediately cancels any active conversation flow (ticket creation, ticket update, time entry, ticket search company picker). The bot replies with `❌ Operation cancelled.` and clears the pending state.
+
 ## [2.9.3] - 2026-04-14
 
 ### Added

@@ -50,6 +50,7 @@ Change Log:
   2026-04-13 v2.9.1 - Fixed ticket search regex: now correctly matches 'what open tickets are open for X', 'what tickets are open for X', 'what tickets are there for X' patterns where 'are open/there/active' appears between 'tickets' and 'for' (Dwain Henderson Jr)
   2026-04-14 v2.9.2 - Fixed ticket search embed size limit: large result sets (50 tickets) now send multiple embeds instead of silently failing Discord's 6000 char total embed limit; added HTTPException fallback to plain text (Dwain Henderson Jr)
   2026-04-14 v2.9.3 - Added configurable service board filter for ticket search: defaults to 'IT Support' and 'GTD - Pet_Projects' boards only; board names resolved to IDs at startup via CW API; set ticket_search_boards:[] in config to disable filter (Dwain Henderson Jr)
+  2026-04-14 v2.9.4 - Added 'exit' to universal cancel keywords; any active conversation flow (ticket creation, update, time entry, ticket search) is now cancelled when user types stop, exit, quit, cancel, abort, nevermind, or never mind on a line by itself (Dwain Henderson Jr)
 """
 
 import re
@@ -1954,7 +1955,7 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
             conv = self.conversations[user_id]
 
             # ── Cancel at any point ──────────────────────────────────────────
-            if content.strip().lower() in ("cancel", "stop", "abort", "quit", "nevermind", "never mind"):
+            if content.strip().lower() in ("cancel", "stop", "abort", "quit", "exit", "nevermind", "never mind"):
                 del self.conversations[user_id]
                 await message.reply("\u274c Operation cancelled.", mention_author=False)
                 return
@@ -2162,7 +2163,7 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
                 data = conv["data"]
 
                 # ── Cancel at any point ──────────────────────────────────────
-                if content.strip().lower() in ("cancel", "stop", "abort", "quit", "nevermind", "never mind"):
+                if content.strip().lower() in ("cancel", "stop", "abort", "quit", "exit", "nevermind", "never mind"):
                     del self.conversations[user_id]
                     await message.reply("❌ Ticket creation cancelled.", mention_author=False)
                     return
