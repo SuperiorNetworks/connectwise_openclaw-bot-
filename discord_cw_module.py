@@ -51,6 +51,7 @@ Change Log:
   2026-04-14 v2.9.2 - Fixed ticket search embed size limit: large result sets (50 tickets) now send multiple embeds instead of silently failing Discord's 6000 char total embed limit; added HTTPException fallback to plain text (Dwain Henderson Jr)
   2026-04-14 v2.9.3 - Added configurable service board filter for ticket search: defaults to 'IT Support' and 'GTD - Pet_Projects' boards only; board names resolved to IDs at startup via CW API; set ticket_search_boards:[] in config to disable filter (Dwain Henderson Jr)
   2026-04-14 v2.9.4 - Added 'exit' to universal cancel keywords; any active conversation flow (ticket creation, update, time entry, ticket search) is now cancelled when user types stop, exit, quit, cancel, abort, nevermind, or never mind on a line by itself (Dwain Henderson Jr)
+  2026-04-15 v2.9.5 - Fixed time entry creation: (1) CW API requires timeStart field — added current UTC timestamp to all time entry payloads; (2) fixed member field format — numeric member IDs now sent as {id:N} instead of {identifier:N}; (3) fixed 'Ticket#NNNNN' (no-space) regex so update commands like 'update Ticket#31745' are correctly detected (Dwain Henderson Jr)
 """
 
 import re
@@ -819,10 +820,19 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
             "Accept": "application/json",
             "Content-Type": "application/json"
         }
+        # CW API requires timeStart; use current UTC time
+        from datetime import timezone as _tz
+        time_start = datetime.now(_tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        # member field: use {"id": N} for numeric IDs, {"identifier": "name"} for strings
+        try:
+            member_field = {"id": int(self.cw_member_id)}
+        except (ValueError, TypeError):
+            member_field = {"identifier": str(self.cw_member_id)}
         payload = {
             "chargeToId": ticket_id,
             "chargeToType": "ServiceTicket",
-            "member": {"identifier": self.cw_member_id},
+            "member": member_field,
+            "timeStart": time_start,
             "actualHours": round(hours, 2),
             "billableOption": "Billable",
             "notes": notes or ""
@@ -1008,13 +1018,14 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
         # Check for update/note ticket command first
         # Matches: update ticket 31666, add to ticket 31666, note on ticket 31666,
         #          add note to ticket 31666, #31666, ticket 31666 - <note>
+        #          Also handles no-space: 'update Ticket#31745' (space before # is optional)
         update_match = re.search(
-            r'(?i)(?:update|add(?:\s+(?:a\s+)?note)?(?:\s+to)?|note(?:\s+on)?(?:\s+to)?)\s+ticket\s+#?(\d{4,6})\b',
+            r'(?i)(?:update|add(?:\s+(?:a\s+)?note)?(?:\s+to)?|note(?:\s+on)?(?:\s+to)?)\s+ticket\s*#?(\d{4,6})\b',
             text
         )
         if not update_match:
-            # Also match bare '#31666' or 'ticket 31666' at start/anywhere
-            update_match = re.search(r'(?i)\bticket\s+#?(\d{4,6})\b', text)
+            # Also match bare '#31666' or 'ticket 31666' or 'Ticket#31666' at start/anywhere
+            update_match = re.search(r'(?i)\bticket\s*#?(\d{4,6})\b', text)
         if not update_match:
             update_match = re.search(r'#(\d{4,6})\b', text)
         # Final fallback: bare standalone 4-6 digit number anywhere in the message
@@ -1024,12 +1035,12 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
             ticket_id = int(update_match.group(1))
             # Strip the ticket reference prefix to get the note text
             note_text = re.sub(
-                r'(?i)(?:update|add(?:\s+(?:a\s+)?note)?(?:\s+to)?|note(?:\s+on)?(?:\s+to)?)\s+ticket\s+#?\d{4,6}\s*[-:\s]*',
+                r'(?i)(?:update|add(?:\s+(?:a\s+)?note)?(?:\s+to)?|note(?:\s+on)?(?:\s+to)?)\s+ticket\s*#?\d{4,6}\s*[-:\s]*',
                 '', text
             ).strip()
-            # Also strip bare 'ticket NNNNN' or '#NNNNN' prefix if note_text still equals original
+            # Also strip bare 'ticket NNNNN' or 'Ticket#NNNNN' prefix if note_text still equals original
             if not note_text or note_text == text:
-                note_text = re.sub(r'(?i)\bticket\s+#?\d{4,6}\s*[-:\s]*', '', text).strip()
+                note_text = re.sub(r'(?i)\bticket\s*#?\d{4,6}\s*[-:\s]*', '', text).strip()
             if not note_text or note_text == text:
                 note_text = re.sub(r'#\d{4,6}\s*[-:\s]*', '', text).strip()
             await self._handle_ticket_update(message, ticket_id, note_text)

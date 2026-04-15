@@ -2,6 +2,13 @@
 
 All notable changes to the Discord Conversational Ticket Bot will be documented in this file.
 
+## [2.9.5] - 2026-04-15
+
+### Fixed
+- **Time entry creation was silently failing** — The ConnectWise `/time/entries` API requires a `timeStart` field (ISO 8601 UTC timestamp). The bot was not sending it, causing every time entry POST to return `400 InvalidObject / MissingRequiredField: timeStart`. The current UTC time is now always included in the payload.
+- **Wrong member field format** — When `cw_member_id` is a numeric value (e.g., `147`), the CW API expects `{"id": 147}`, not `{"identifier": "147"}`. The bot now auto-detects whether the member ID is numeric or a string username and sends the correct format.
+- **`Ticket#NNNNN` (no-space) not recognized** — Commands like `update Ticket#31745 1.5hrs ...` were not being matched by the update regex because it required a space between `ticket` and `#`. The space is now optional in all update/note regex patterns.
+
 ## [2.9.4] - 2026-04-14
 
 ### Added
