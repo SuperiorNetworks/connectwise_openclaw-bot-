@@ -2,6 +2,14 @@
 
 All notable changes to the Discord Conversational Ticket Bot will be documented in this file.
 
+## [2.9.6] - 2026-04-15
+
+### Fixed
+- **Time of day now recorded correctly in ConnectWise** — `_parse_time_range` now supports 12-hour am/pm format (`4:30p - 6p`, `4:30pm-6pm`) in addition to 24-hour format. The parsed times are converted from local time (Eastern, UTC-4 by default) to UTC and sent as `timeStart` and `timeEnd` in the time entry payload. Previously, the bot always used the current UTC clock time, causing entries like `4:30 PM EDT` to show as `12:02 AM` in ConnectWise.
+- **Inline hours auto-detected** — Plain hour/minute values (`1.5hrs`, `90min`, `2h`) in the initial update message are now extracted automatically. The bot skips the "Time to log?" prompt when hours are already present in the message.
+- **`timeEnd` now sent to CW API** — `log_time()` now sends `timeEnd` alongside `timeStart`, so both Start Time and End Time columns populate correctly in ConnectWise.
+- **Config key** — Add `"tz_offset_hours": -5` to the bot config for EST (winter), or `-4` for EDT (summer, default).
+
 ## [2.9.5] - 2026-04-15
 
 ### Fixed

@@ -51,6 +51,7 @@ Change Log:
   2026-04-14 v2.9.2 - Fixed ticket search embed size limit: large result sets (50 tickets) now send multiple embeds instead of silently failing Discord's 6000 char total embed limit; added HTTPException fallback to plain text (Dwain Henderson Jr)
   2026-04-14 v2.9.3 - Added configurable service board filter for ticket search: defaults to 'IT Support' and 'GTD - Pet_Projects' boards only; board names resolved to IDs at startup via CW API; set ticket_search_boards:[] in config to disable filter (Dwain Henderson Jr)
   2026-04-14 v2.9.4 - Added 'exit' to universal cancel keywords; any active conversation flow (ticket creation, update, time entry, ticket search) is now cancelled when user types stop, exit, quit, cancel, abort, nevermind, or never mind on a line by itself (Dwain Henderson Jr)
+  2026-04-15 v2.9.6 - Timezone-aware time parsing: _parse_time_range now supports 12h am/pm format ('4:30p-6p', '4:30pm-6pm') and returns UTC timeStart/timeEnd; log_time() sends timeEnd to CW; inline hours ('1.5hrs') in initial message now auto-detected so bot skips time prompt; tz_offset_hours config key (default -4 EDT) controls local->UTC conversion (Dwain Henderson Jr)
   2026-04-15 v2.9.5 - Fixed time entry creation: (1) CW API requires timeStart field — added current UTC timestamp to all time entry payloads; (2) fixed member field format — numeric member IDs now sent as {id:N} instead of {identifier:N}; (3) fixed 'Ticket#NNNNN' (no-space) regex so update commands like 'update Ticket#31745' are correctly detected (Dwain Henderson Jr)
 """
 
@@ -809,8 +810,11 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
                 else:
                     await message.channel.send(plain[:2000])
 
-    def log_time(self, ticket_id: int, hours: float, notes: str = "", work_role_id: int = None) -> dict:
-        """Create a time entry on a ConnectWise ticket via /time/entries"""
+    def log_time(self, ticket_id: int, hours: float, notes: str = "", work_role_id: int = None,
+                 time_start: str = None, time_end: str = None) -> dict:
+        """Create a time entry on a ConnectWise ticket via /time/entries.
+        time_start and time_end should be UTC ISO strings (e.g. '2026-04-15T20:30:00Z').
+        If not provided, current UTC time is used for timeStart."""
         auth = base64.b64encode(
             f"{self.cw_company}+{self.cw_public_key}:{self.cw_private_key}".encode()
         ).decode()
@@ -820,9 +824,10 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
             "Accept": "application/json",
             "Content-Type": "application/json"
         }
-        # CW API requires timeStart; use current UTC time
+        # CW API requires timeStart; use provided value or fall back to current UTC time
         from datetime import timezone as _tz
-        time_start = datetime.now(_tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        if not time_start:
+            time_start = datetime.now(_tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         # member field: use {"id": N} for numeric IDs, {"identifier": "name"} for strings
         try:
             member_field = {"id": int(self.cw_member_id)}
@@ -837,6 +842,8 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
             "billableOption": "Billable",
             "notes": notes or ""
         }
+        if time_end:
+            payload["timeEnd"] = time_end
         if work_role_id:
             payload["workRole"] = {"id": work_role_id}
         try:
@@ -853,20 +860,58 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
             return {"status": "error", "error": str(e)}
 
     def _parse_time_range(self, text: str):
-        """Extract hours from a time range like '22:00 - 22:45' or '10:00-11:30'.
-        Returns (hours_float, cleaned_text) or (None, original_text)."""
-        pattern = re.compile(r'\b(\d{1,2}):(\d{2})\s*[-\u2013]\s*(\d{1,2}):(\d{2})\b')
-        m = pattern.search(text)
-        if not m:
-            return None, text
-        sh, sm, eh, em = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
+        """Extract hours from a time range like '4:30p - 6p', '16:30-18:00', '4:30pm-6:00pm'.
+        Supports 12-hour (am/pm) and 24-hour formats.
+        Returns (hours_float, timeStart_utc, timeEnd_utc, cleaned_text)
+        or (None, None, None, original_text) if no match.
+        Uses self.tz_offset_hours (default -4 EDT) to convert local time to UTC."""
+        from datetime import timedelta as _td
+        tz_offset = getattr(self, 'tz_offset_hours', -4)
+        # 12-hour format: '4:30p - 6p', '4:30pm - 6:00pm', '4p-6p'
+        pat12 = re.compile(
+            r'(\d{1,2})(?::(\d{2}))?\s*([ap]m?)\s*[-\u2013]\s*(\d{1,2})(?::(\d{2}))?\s*([ap]m?)',
+            re.IGNORECASE
+        )
+        # 24-hour format: '16:30 - 18:00'
+        pat24 = re.compile(r'\b(\d{1,2}):(\d{2})\s*[-\u2013]\s*(\d{1,2}):(\d{2})\b')
+        m12 = pat12.search(text)
+        m24 = pat24.search(text)
+        if m12:
+            sh_s, sm_s, s_ap, eh_s, em_s, e_ap = m12.groups()
+            sh, eh = int(sh_s), int(eh_s)
+            sm = int(sm_s) if sm_s else 0
+            em = int(em_s) if em_s else 0
+            if s_ap.lower().startswith('p') and sh != 12:
+                sh += 12
+            elif s_ap.lower().startswith('a') and sh == 12:
+                sh = 0
+            if e_ap.lower().startswith('p') and eh != 12:
+                eh += 12
+            elif e_ap.lower().startswith('a') and eh == 12:
+                eh = 0
+            matched_pat = pat12
+        elif m24:
+            sh, sm, eh, em = int(m24.group(1)), int(m24.group(2)), int(m24.group(3)), int(m24.group(4))
+            matched_pat = pat24
+        else:
+            return None, None, None, text
         start_min = sh * 60 + sm
         end_min = eh * 60 + em
         if end_min <= start_min:
             end_min += 24 * 60  # crossed midnight
         hours = round((end_min - start_min) / 60, 2)
-        cleaned = pattern.sub('', text).strip().lstrip('- ').strip()
-        return hours, cleaned
+        # Build UTC timestamps from local time + timezone offset
+        from datetime import timezone as _tz
+        today = datetime.now(_tz.utc).date()
+        local_tz = _tz(_td(hours=tz_offset))
+        start_local = datetime(today.year, today.month, today.day, sh, sm, tzinfo=local_tz)
+        end_local = datetime(today.year, today.month, today.day, eh % 24, em, tzinfo=local_tz)
+        if end_min > 24 * 60:
+            end_local = end_local + _td(days=1)
+        start_utc = start_local.astimezone(_tz.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+        end_utc = end_local.astimezone(_tz.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+        cleaned = matched_pat.sub('', text).strip().lstrip('- ').strip()
+        return hours, start_utc, end_utc, cleaned
 
     def update_ticket(self, ticket_id: int, note: str, member_id: str = None) -> dict:
         """Add a note/update to an existing ConnectWise ticket"""
@@ -1143,12 +1188,25 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
 
         # Extract 'Work Role: <name>' line and resolve to CW work role ID
         work_role_id, note = self._extract_work_role(note)
-
-        # Try to extract a time range from the note text (e.g. '22:00 - 22:45')
+        # Try to extract a time range from the note text (e.g. '4:30p - 6p', '16:30-18:00')
+        inline_time_start = None
+        inline_time_end = None
         if hours is None:
-            detected_hours, note = self._parse_time_range(note)
+            detected_hours, ts_utc, te_utc, note = self._parse_time_range(note)
             if detected_hours is not None:
                 hours = detected_hours
+                inline_time_start = ts_utc
+                inline_time_end = te_utc
+        # Also try plain hour/minute extraction from the note (e.g. '1.5hrs', '90min')
+        if hours is None:
+            h_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:h(?:ours?|rs?)?)', note, re.IGNORECASE)
+            m_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:m(?:in(?:utes?)?)?)', note, re.IGNORECASE)
+            if h_match:
+                hours = float(h_match.group(1))
+                note = re.sub(r'(\d+(?:\.\d+)?)\s*(?:h(?:ours?|rs?)?)', '', note, count=1, flags=re.IGNORECASE).strip()
+            elif m_match:
+                hours = round(float(m_match.group(1)) / 60, 2)
+                note = re.sub(r'(\d+(?:\.\d+)?)\s*(?:m(?:in(?:utes?)?)?)', '', note, count=1, flags=re.IGNORECASE).strip()
 
         # If note is empty after stripping, prompt for one (unless we have hours — then it's OK)
         if not note and hours is None:
@@ -1210,7 +1268,8 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
         time_logged = None
         work_role_name = None
         if hours:
-            time_result = self.log_time(ticket_id, hours, note, work_role_id=work_role_id)
+            time_result = self.log_time(ticket_id, hours, note, work_role_id=work_role_id,
+                                        time_start=inline_time_start, time_end=inline_time_end)
             if time_result["status"] == "success":
                 time_logged = hours
                 if work_role_id:
@@ -2103,9 +2162,14 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
                 data = conv["data"]
                 del self.conversations[user_id]
                 hours = None
+                reply_time_start = None
+                reply_time_end = None
                 if content.strip().lower() not in ("skip", "s", "no", "none"):
-                    # Try time range first (e.g. 22:00 - 22:45)
-                    hours, _ = self._parse_time_range(content)
+                    # Try time range first (e.g. '4:30p - 6p', '16:30 - 18:00')
+                    hours, ts_utc, te_utc, _ = self._parse_time_range(content)
+                    if hours is not None:
+                        reply_time_start = ts_utc
+                        reply_time_end = te_utc
                     if hours is None:
                         h_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:h(?:ours?|rs?)?)', content, re.IGNORECASE)
                         m_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:m(?:in(?:utes?)?)?)', content, re.IGNORECASE)
@@ -2124,7 +2188,8 @@ class DiscordTicketBotV2Enhanced(commands.Cog):
                 work_role_name = None
                 if hours:
                     saved_work_role_id = data.get("work_role_id")
-                    time_result = self.log_time(data["ticket_id"], hours, data["note"], work_role_id=saved_work_role_id)
+                    time_result = self.log_time(data["ticket_id"], hours, data["note"], work_role_id=saved_work_role_id,
+                                                time_start=reply_time_start, time_end=reply_time_end)
                     if time_result["status"] == "success":
                         time_logged = hours
                         if saved_work_role_id:
